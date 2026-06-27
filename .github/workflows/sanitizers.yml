@@ -1,0 +1,47 @@
+on:
+  workflow_call:
+
+name: sanitizers
+
+permissions: read-all
+
+jobs:
+  sanitizers:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+      CC: clang
+      CXX: clang++
+      CFLAGS: -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
+      CXXFLAGS: -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
+      LDFLAGS: -fsanitize=address,undefined
+      ASAN_OPTIONS: detect_leaks=1:strict_init_order=1
+      UBSAN_OPTIONS: print_stacktrace=1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: devel
+          http-user-agent: release
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::rcmdcheck
+          needs: check
+
+      - name: Run R CMD check with sanitizers
+        shell: Rscript {0}
+        run: |
+          rcmdcheck::rcmdcheck(
+            args = c("--no-manual", "--as-cran"),
+            build_args = c("--no-manual"),
+            error_on = "warning"
+          )
