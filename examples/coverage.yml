@@ -9,6 +9,6 @@ name: coverage
 
 jobs:
   coverage:
-    uses: pedrobtz/r-actions/.github/workflows/coverage.yml@main
+    uses: pedrobtz/r-actions/.github/workflows/coverage.yml@v1
     permissions:
       contents: write

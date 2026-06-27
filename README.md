@@ -4,6 +4,17 @@ Reusable GitHub Actions workflows for R packages, covering test coverage,
 memory safety, undefined behaviour, and static analysis checks that complement
 the standard `R CMD check` run by [r-lib/actions](https://github.com/r-lib/actions).
 
+## Versioning
+
+Workflows are released under [semantic versioning](https://semver.org/). Pin
+consumers to a major-version tag (e.g. `@v1`) to receive backwards-compatible
+updates automatically, or to an exact tag (e.g. `@v1.0.0`) to lock a specific
+release. Avoid `@main`—it tracks the development tip and may contain breaking
+changes.
+
+See [Releases](https://github.com/pedrobtz/r-actions/releases) for the full
+changelog.
+
 ## Workflows
 
 ### `coverage.yml` — Test coverage
@@ -20,7 +31,7 @@ yellow ≥ 75 %, orange ≥ 60 %, red below 60 %.
 ```yaml
 jobs:
   coverage:
-    uses: pedrobtz/r-actions/.github/workflows/coverage.yml@main
+    uses: pedrobtz/r-actions/.github/workflows/coverage.yml@v1
     permissions:
       contents: write
 ```
@@ -42,7 +53,7 @@ Mirrors CRAN's "Additional issues: ASAN/UBSAN" flavor.
 ```yaml
 jobs:
   sanitizers:
-    uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@main
+    uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
 ```
 
 ### `valgrind.yml` — Valgrind
@@ -54,7 +65,7 @@ machine. Slower than the sanitizers job.
 ```yaml
 jobs:
   valgrind:
-    uses: pedrobtz/r-actions/.github/workflows/valgrind.yml@main
+    uses: pedrobtz/r-actions/.github/workflows/valgrind.yml@v1
 ```
 
 ### `lto.yml` — Link-Time Optimization
@@ -67,7 +78,7 @@ CRAN's "Additional issues: LTO" flavor.
 ```yaml
 jobs:
   lto:
-    uses: pedrobtz/r-actions/.github/workflows/lto.yml@main
+    uses: pedrobtz/r-actions/.github/workflows/lto.yml@v1
 ```
 
 ### `gctorture.yml` — GC Torture
@@ -80,7 +91,7 @@ crash. Runtime complement to the static `rchk` job.
 ```yaml
 jobs:
   gctorture:
-    uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@main
+    uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@v1
 ```
 
 ### `rchk.yml` — rchk static analysis
@@ -95,7 +106,7 @@ report false positives that need human judgement.
 ```yaml
 jobs:
   rchk:
-    uses: pedrobtz/r-actions/.github/workflows/rchk.yml@main
+    uses: pedrobtz/r-actions/.github/workflows/rchk.yml@v1
 ```
 
 ## Usage
@@ -118,7 +129,7 @@ name: coverage
 
 jobs:
   coverage:
-    uses: pedrobtz/r-actions/.github/workflows/coverage.yml@main
+    uses: pedrobtz/r-actions/.github/workflows/coverage.yml@v1
     permissions:
       contents: write
 ```
@@ -138,19 +149,19 @@ name: native-checks
 
 jobs:
   sanitizers:
-    uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@main
+    uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
 
   valgrind:
-    uses: pedrobtz/r-actions/.github/workflows/valgrind.yml@main
+    uses: pedrobtz/r-actions/.github/workflows/valgrind.yml@v1
 
   lto:
-    uses: pedrobtz/r-actions/.github/workflows/lto.yml@main
+    uses: pedrobtz/r-actions/.github/workflows/lto.yml@v1
 
   gctorture:
-    uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@main
+    uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@v1
 
   rchk:
-    uses: pedrobtz/r-actions/.github/workflows/rchk.yml@main
+    uses: pedrobtz/r-actions/.github/workflows/rchk.yml@v1
 ```
 
 All five jobs appear under a single workflow run in the GitHub UI and execute
@@ -171,5 +182,5 @@ name: native-checks
 
 jobs:
   gctorture:
-    uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@main
+    uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@v1
 ```
