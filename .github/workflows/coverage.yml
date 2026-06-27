@@ -39,8 +39,25 @@ jobs:
           cat(sprintf("pct=%.1f\n", pct), file = Sys.getenv("GITHUB_OUTPUT"), append = TRUE)
           cat(sprintf("color=%s\n", color), file = Sys.getenv("GITHUB_OUTPUT"), append = TRUE)
 
-          out <- capture.output(print(cov))
-          md <- c("## Coverage", "```", out, "```")
+          df <- as.data.frame(cov)
+          files <- sort(unique(df$filename))
+          rows <- vapply(files, function(f) {
+            sub_df <- df[df$filename == f, ]
+            total   <- nrow(sub_df)
+            covered <- sum(sub_df$value > 0)
+            file_pct <- if (total > 0) 100 * covered / total else 0
+            sprintf("| `%s` | %d | %d | %.1f%% |", f, total, covered, file_pct)
+          }, character(1))
+
+          md <- c(
+            "## Coverage",
+            "",
+            sprintf("**Overall: %.1f%%**", pct),
+            "",
+            "| File | Expressions | Covered | Coverage |",
+            "|:-----|------------:|--------:|---------:|",
+            rows
+          )
           writeLines(md, Sys.getenv("GITHUB_STEP_SUMMARY"))
 
       - name: Render badge
