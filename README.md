@@ -1,10 +1,36 @@
 # r-actions
 
-Reusable GitHub Actions workflows for R packages, covering memory safety,
-undefined behaviour, and static analysis checks that complement the standard
-`R CMD check` run by [r-lib/actions](https://github.com/r-lib/actions).
+Reusable GitHub Actions workflows for R packages, covering test coverage,
+memory safety, undefined behaviour, and static analysis checks that complement
+the standard `R CMD check` run by [r-lib/actions](https://github.com/r-lib/actions).
 
 ## Workflows
+
+### `coverage.yml` — Test coverage
+
+Measures test coverage with [covr](https://covr.r-lib.org/), writes a
+per-file breakdown to the job summary, and commits a self-hosted SVG badge to
+`.github/badges/coverage.svg` on every push to `main`/`master` (avoiding
+external badge services). The badge colour thresholds are: green ≥ 90 %,
+yellow ≥ 75 %, orange ≥ 60 %, red below 60 %.
+
+> **Note:** this workflow commits back to the repository, so the caller must
+> grant `contents: write`.
+
+```yaml
+jobs:
+  coverage:
+    uses: pedrobtz/r-actions/.github/workflows/coverage.yml@main
+    permissions:
+      contents: write
+```
+
+To display the badge in your README, add the following line (replacing
+`{owner}/{repo}` with your repository):
+
+```markdown
+![Coverage]({owner}/{repo}/raw/main/.github/badges/coverage.svg)
+```
 
 ### `sanitizers.yml` — AddressSanitizer + UndefinedBehaviorSanitizer
 
@@ -74,7 +100,30 @@ jobs:
 
 ## Usage
 
-### Run all checks together
+### Coverage
+
+Copy [`examples/coverage.yml`](examples/coverage.yml) into your package as
+`.github/workflows/coverage.yml`. The `paths-ignore` filter prevents a push
+loop when the workflow commits an updated badge:
+
+```yaml
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - ".github/badges/coverage.svg"
+  pull_request:
+
+name: coverage
+
+jobs:
+  coverage:
+    uses: pedrobtz/r-actions/.github/workflows/coverage.yml@main
+    permissions:
+      contents: write
+```
+
+### Run all native checks together
 
 Copy [`examples/native-checks.yml`](examples/native-checks.yml) into your
 package as `.github/workflows/native-checks.yml`:
