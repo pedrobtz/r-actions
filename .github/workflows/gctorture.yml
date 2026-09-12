@@ -1,5 +1,18 @@
 on:
   workflow_call:
+    inputs:
+      timeout-minutes:
+        description: >
+          Job timeout in minutes. gctorture2(step = 20) forces a garbage
+          collection every 20 allocations, so a suite that normally runs in
+          seconds can take tens of minutes here, and one with large test
+          data can take hours. Raise this for such a package, or better,
+          gate its heavy tests behind an opt-in environment variable --
+          tests that check limits rather than memory safety add nothing to
+          this job.
+        type: number
+        required: false
+        default: 120
 
 name: gctorture
 
@@ -8,7 +21,7 @@ permissions: read-all
 jobs:
   gctorture:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       R_KEEP_PKG_SOURCE: yes

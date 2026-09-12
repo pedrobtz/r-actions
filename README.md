@@ -94,6 +94,23 @@ jobs:
     uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@v1
 ```
 
+The job times out after 120 minutes by default. Because a GC every 20
+allocations makes everything slow, a package with large test data can exceed
+that; raise the limit with the `timeout-minutes` input:
+
+```yaml
+jobs:
+  gctorture:
+    uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@v1
+    with:
+      timeout-minutes: 240
+```
+
+Prefer gating the heavy tests instead, where you can. `testthat::test_local()`
+sets `NOT_CRAN`, so anything behind `skip_on_cran()` *will* run here — and
+tests that check limits (row counts, column caps, file sizes) rather than
+memory safety cost this job a great deal and tell it nothing.
+
 ### `rchk.yml` — rchk static analysis
 
 Runs [Tomas Kalibera's rchk](https://github.com/kalibera/rchk) static analyzer
