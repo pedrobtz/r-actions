@@ -8,6 +8,8 @@ name: native-checks
 jobs:
   sanitizers:
     uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
+    with:
+      asan: true
 
   valgrind:
     uses: pedrobtz/r-actions/.github/workflows/valgrind.yml@v1

@@ -28,6 +28,62 @@ on:
         type: number
         required: false
         default: 60
+      asan:
+        description: >
+          Also run the `asan` job below: AddressSanitizer, in the R-hub
+          containers. Off by default, so that turning it on is a decision a
+          package makes rather than something it acquires from a tag bump.
+
+          Read the comment on that job before enabling it -- ASan and UBSan
+          answer different questions, and this one costs more.
+        type: boolean
+        required: false
+        default: false
+      asan-containers:
+        description: >
+          JSON array of R-hub container names for the `asan` job. Names come
+          from https://r-hub.github.io/containers/. `clang-ubsan` works here
+          too and overlaps with the `sanitizers` job, which runs UBSan on an
+          ordinary runner instead.
+        type: string
+        required: false
+        default: '["clang-asan", "gcc-asan"]'
+      asan-run:
+        description: >
+          Shell command for the `asan` job to run instead of `R CMD check`.
+
+          The default path is fine for most packages -- measured at about two
+          minutes on a package with five Suggests, which pak resolved as
+          binaries from the image's own repository rather than building them.
+          Reach for this when that does not hold: a Suggests with no binary
+          for the image, a suite too slow to run instrumented, or a package
+          whose interesting paths are not the ones its tests spend time on.
+
+          A sanitizer earns its keep on error and unwind paths -- where an
+          R-level longjmp skips whatever C had allocated -- and an ordinary
+          suite exercises those only incidentally. A small driver aimed at
+          them, using base R only, needs no dependencies at all: pair this
+          with asan-dependencies: false.
+
+          Whatever it prints is scanned for sanitizer diagnostics, and a
+          non-zero exit fails the job.
+        type: string
+        required: false
+        default: ""
+      asan-dependencies:
+        description: >
+          Install the package's dependencies in the `asan` job. Suggests are
+          included, because `R CMD check` treats a missing one as an ERROR --
+          which is what this job did until it was run against a real package.
+
+          Turn it off when `asan-run` needs nothing but base R. Anything the
+          image's repository has no binary for is built from source, and a
+          dependency with compiled code is built instrumented, so the cost
+          varies from seconds to the whole job depending on what you depend
+          on.
+        type: boolean
+        required: false
+        default: true
 
 name: sanitizers
 
@@ -162,3 +218,159 @@ jobs:
             build_args = c("--no-manual"),
             error_on = "warning"
           )
+
+  # AddressSanitizer, in the R-hub containers -- which is the one place it
+  # works for an R package, and the reason the job above does not attempt it.
+  #
+  # Everything the comment above says is true of an ordinary runner. These
+  # images have already done all three things it lists:
+  #
+  #   clang-asan   R itself is a `devel-asan` build, so the interpreter is
+  #                instrumented and interceptors are installed from process
+  #                start.
+  #   gcc-asan     libasan and libubsan are LD_PRELOADed from inside the `R`
+  #                and `Rscript` wrapper scripts, with
+  #                ASAN_OPTIONS='detect_leaks=0' set image-wide.
+  #
+  # Their R also compiles packages with -fsanitize=address,undefined from its
+  # own Makeconf, so this job passes no sanitizer flags of its own -- the
+  # opposite of the job above, where getting the flags into ~/.R/Makevars is
+  # the whole difficulty. It still verifies, for the same reason: half
+  # configured, a sanitizer finds nothing and says so in a way that reads
+  # exactly like success.
+  asan:
+    if: inputs.asan
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        container: ${{ fromJson(inputs.asan-containers) }}
+
+    name: asan (${{ matrix.container }})
+
+    container:
+      image: ghcr.io/r-hub/containers/${{ matrix.container }}:latest
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # dependencies = TRUE, so Suggests are included: R CMD check reports a
+      # missing Suggests as an ERROR, not a NOTE, and most of these images'
+      # binary repository does not carry them. _R_CHECK_FORCE_SUGGESTS_ below
+      # is the backstop for the ones that still fail to build instrumented.
+      - name: Install dependencies
+        if: inputs.asan-dependencies
+        run: |
+          set -eu
+          Rscript -e 'pak::local_install_deps(".", dependencies = TRUE, upgrade = FALSE)'
+
+      # --preclean matters. An object file left in src/ that is newer than its
+      # source is reused, the sanitizer flags then reach only the link step,
+      # and the result is a green job on a build with no instrumentation in
+      # it. pkgload leaves exactly such objects behind.
+      - name: Install the package
+        run: |
+          set -eu
+          mkdir -p "${GITHUB_WORKSPACE}/lib"
+          R CMD INSTALL --preclean --library="${GITHUB_WORKSPACE}/lib" .
+
+      # The same check the job above makes, for the same reason, against the
+      # other runtime. Kept inline rather than factored into a composite
+      # action: a reusable workflow cannot reach a local action by relative
+      # path, because `./` resolves against the *caller's* checkout, and
+      # referring to it as pedrobtz/r-actions/...@v1 pins a version inside a
+      # file that is itself versioned.
+      - name: Verify instrumentation
+        run: |
+          set -eu
+          if [ ! -d src ]; then
+            echo "No src/ directory: nothing to instrument."
+            exit 0
+          fi
+          found=0
+          for so in "${GITHUB_WORKSPACE}"/lib/*/libs/*.so; do
+            [ -e "$so" ] || continue
+            found=1
+            echo "== $so"
+            if { nm -D "$so" 2>/dev/null; nm "$so" 2>/dev/null; } \
+                 | grep -q '__asan'; then
+              echo "   ok: ASan runtime is referenced"
+            else
+              echo "   FAIL: no __asan* symbols; the build was not instrumented" >&2
+              echo "   The image's R is expected to compile packages with" >&2
+              echo "   -fsanitize=address from its own Makeconf. Check that a" >&2
+              echo "   package-level src/Makevars is not overriding CFLAGS." >&2
+              exit 1
+            fi
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "No shared object was installed; nothing to verify." >&2
+            exit 1
+          fi
+
+      - name: Apply caller environment
+        if: inputs.env != ''
+        env:
+          CALLER_ENV: ${{ inputs.env }}
+        run: |
+          set -eu
+          printf '%s\n' "$CALLER_ENV" | while IFS= read -r line; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+              *) echo "Ignoring malformed env line: $line" >&2 ;;
+            esac
+          done
+
+      # ASan aborts on a memory error, so a finding is usually a non-zero
+      # exit. The grep is for the cases where it is not: a diagnostic from a
+      # subprocess that R CMD check records as an ordinary test failure, or a
+      # UBSan finding from the same build, which prints and carries on.
+      #
+      # `|| status=$?` rather than letting the shell abort, so the log is
+      # printed before the job ends. A sanitizer job whose output was
+      # swallowed is a job that taught nobody anything.
+      - name: Run under the sanitizer
+        env:
+          R_LIBS: ${{ github.workspace }}/lib
+          UBSAN_OPTIONS: print_stacktrace=1
+          RUN_COMMAND: ${{ inputs.asan-run }}
+          _R_CHECK_FORCE_SUGGESTS_: "false"
+        run: |
+          set -u
+          status=0
+          if [ -n "$RUN_COMMAND" ]; then
+            sh -c "$RUN_COMMAND" > sanitizer.log 2>&1 || status=$?
+          else
+            R CMD build --no-build-vignettes --no-manual . > sanitizer.log 2>&1 || status=$?
+            if [ "$status" -eq 0 ]; then
+              tarball=$(ls -t ./*.tar.gz | head -1)
+              R CMD check --no-manual --no-build-vignettes "$tarball" \
+                >> sanitizer.log 2>&1 || status=$?
+              for out in ./*.Rcheck/*.Rout ./*.Rcheck/*.Rout.fail \
+                         ./*.Rcheck/tests/*.Rout ./*.Rcheck/tests/*.Rout.fail; do
+                [ -e "$out" ] || continue
+                echo "----- $out -----" >> sanitizer.log
+                cat "$out" >> sanitizer.log
+              done
+            fi
+          fi
+          cat sanitizer.log
+          if grep -qE "AddressSanitizer|LeakSanitizer|runtime error:|SUMMARY: .*Sanitizer" sanitizer.log; then
+            echo "::error::sanitizer reported a problem"
+            exit 1
+          fi
+          exit "$status"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: asan-${{ matrix.container }}
+          path: sanitizer.log
+          if-no-files-found: ignore

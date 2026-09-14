@@ -79,20 +79,78 @@ links into a real executable: a libFuzzer target or a standalone replay
 driver. UBSan has no such problem, because its shared runtime can arrive by
 `DT_NEEDED` at `dlopen` time.
 
-For heap errors in an R package, `valgrind.yml` below is the job that covers
-that ground.
+For heap errors in an R package, `valgrind.yml` below covers that ground on an
+ordinary runner, and the `asan` job below covers it where ASan does work.
+
+#### The `asan` job — AddressSanitizer, in the R-hub containers
+
+Off by default. `asan: true` adds a second job to this workflow that runs the
+package under ASan inside `ghcr.io/r-hub/containers/clang-asan` and
+`gcc-asan`, verifies with `nm` that the installed shared object really is
+instrumented, and fails on a diagnostic in the output as well as on a non-zero
+exit.
+
+```yaml
+jobs:
+  sanitizers:
+    uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
+    with:
+      asan: true
+```
+
+Everything the note above says is true of an ordinary runner. These images
+have already done all three things it lists: `clang-asan` ships an R that is
+itself a `devel-asan` build, and `gcc-asan` `LD_PRELOAD`s `libasan` from
+inside the `R` and `Rscript` wrappers with `ASAN_OPTIONS='detect_leaks=0'` set
+image-wide. Their R also compiles packages with
+`-fsanitize=address,undefined` from its own `Makeconf`, so this job passes no
+sanitizer flags of its own.
+
+Optional inputs:
+
+```yaml
+jobs:
+  sanitizers:
+    uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
+    with:
+      asan: true
+      asan-containers: '["clang-asan", "gcc-asan"]'   # default
+      asan-dependencies: false                        # default true
+      asan-run: Rscript tools/sanitizer-exercise.R
+```
+
+`asan-run` replaces `R CMD check` with a command of your own. The default path
+is fine for most packages — measured at about two minutes on a package with
+five Suggests, which pak resolved as binaries from the image's own repository
+rather than building them. Reach for `asan-run` when that does not hold: a
+Suggests with no binary for the image, a suite too slow to run instrumented,
+or a package whose interesting paths are not the ones its tests spend time on.
+
+A sanitizer earns its keep on error and unwind paths — where an R-level
+`longjmp` skips whatever C had allocated — and an ordinary suite exercises
+those only incidentally. A driver aimed at them needs no dependencies at all,
+so pair it with `asan-dependencies: false`.
 
 ### `valgrind.yml` — Valgrind
 
-Runs `R CMD check --use-valgrind` under R-release. Catches heap errors and
-memory leaks that ASAN may miss, and is the check CRAN runs on their valgrind
-machine. Slower than the sanitizers job.
+Runs `R CMD check --use-valgrind` under R-release, then **scans the check
+output and fails on a finding**. Catches heap errors and memory leaks, and is
+the check CRAN runs on their valgrind machine. Slower than the sanitizers job.
 
 ```yaml
 jobs:
   valgrind:
     uses: pedrobtz/r-actions/.github/workflows/valgrind.yml@v1
+    with:
+      timeout-minutes: 60     # default
 ```
+
+The scan is not optional extra credit. `R CMD check` does not fail on a
+valgrind finding: valgrind writes to the `.Rout` files, check reads them for R
+errors only, and the job goes green with `definitely lost` in a log nobody
+opens. Valgrind has no equivalent of UBSan's `halt_on_error`, so grepping the
+output is the only way — which is what R-hub's own container scripts do.
+The whole check directory is uploaded as an artifact.
 
 ### `lto.yml` — Link-Time Optimization
 
@@ -150,6 +208,17 @@ report false positives that need human judgement.
 jobs:
   rchk:
     uses: pedrobtz/r-actions/.github/workflows/rchk.yml@v1
+```
+
+Once a package is at zero findings the calculation reverses — the next one is
+a regression, and a warning nobody opens is not how you want to hear about it:
+
+```yaml
+jobs:
+  rchk:
+    uses: pedrobtz/r-actions/.github/workflows/rchk.yml@v1
+    with:
+      fail-on-findings: true
 ```
 
 ## Usage
