@@ -1,0 +1,100 @@
+on:
+  workflow_call:
+    inputs:
+      vendor-dir:
+        description: >
+          Path to the vendored third-party sources, relative to the
+          repository root. Changes under here are what the guard watches.
+        type: string
+        required: false
+        default: src/vendor
+      verify:
+        description: >
+          Script that checks the vendored tree against its manifest, run
+          from the repository root. Skipped if the file does not exist, so a
+          package can adopt the PR guard before it has a verifier.
+        type: string
+        required: false
+        default: tools/vendor/verify
+      must-update:
+        description: >
+          Files a PR touching `vendor-dir` must also change, one path per
+          line. The point is that vendored code is only ever updated through
+          the fetch-and-record tooling: a hand edit that skips the manifest
+          leaves a tree nobody can reproduce, and a manifest update that
+          skips the checksums leaves one nobody can verify.
+        type: string
+        required: false
+        default: |
+          tools/vendor/manifest.tsv
+          tools/vendor/checksums.sha256
+
+name: vendor
+
+permissions: read-all
+
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    name: vendored sources match manifest
+    steps:
+      # Full history: the guard diffs against the PR's base.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify the vendored tree
+        run: |
+          set -eu
+          if [ ! -e "${{ inputs.verify }}" ]; then
+            echo "No ${{ inputs.verify }}; skipping tree verification."
+            exit 0
+          fi
+          chmod +x "${{ inputs.verify }}" 2>/dev/null || true
+          "./${{ inputs.verify }}"
+
+      # Reproducibility is the property being defended, and it is a property
+      # of the commit, not of the working tree -- so it has to be checked on
+      # the diff. A verifier alone passes happily on a hand-edited file whose
+      # checksum was re-recorded to match it.
+      - name: Vendored changes must update the manifest
+        if: github.event_name == 'pull_request'
+        run: |
+          set -eu
+          base="origin/${{ github.base_ref }}"
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          changed=$(git diff --name-only "$base"...HEAD)
+
+          dir='${{ inputs.vendor-dir }}'
+          dir=${dir%/}
+          touched=$(printf '%s\n' "$changed" | grep "^$dir/" || true)
+          if [ -z "$touched" ]; then
+            echo "ok  no $dir/ changes in this PR"
+            exit 0
+          fi
+
+          echo "This PR changes $dir/:"
+          printf '%s\n' "$touched" | sed 's/^/  /'
+
+          # Read from a file, not a pipe: a `while` on the right of a pipe
+          # runs in a subshell, so a failure recorded inside it is lost
+          # unless it is propagated by hand -- and a guard that cannot fail
+          # is the thing this workflow exists to avoid.
+          printf '%s\n' "${{ inputs.must-update }}" > /tmp/vendor-required
+          printf '%s\n' "$changed" > /tmp/vendor-changed
+          missing=0
+          while IFS= read -r want; do
+            [ -n "$want" ] || continue
+            if ! grep -qx "$want" /tmp/vendor-changed; then
+              echo
+              echo "FAIL $dir/ changed without updating $want."
+              missing=1
+            fi
+          done < /tmp/vendor-required
+          if [ "$missing" -ne 0 ]; then
+            echo
+            echo "     Vendored code is only ever updated through the fetch"
+            echo "     and record tooling, so the tree stays reproducible."
+            exit 1
+          fi
+          echo "ok  every required file was updated alongside"

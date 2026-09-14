@@ -131,6 +131,34 @@ A sanitizer earns its keep on error and unwind paths — where an R-level
 those only incidentally. A driver aimed at them needs no dependencies at all,
 so pair it with `asan-dependencies: false`.
 
+### `vendor.yml` — vendored-source guard
+
+For packages that bundle third-party sources. Runs the package's own
+verifier, and — on pull requests — fails when files under the vendored
+directory change without the manifest and checksums changing too.
+
+The PR half is the part a verifier cannot do on its own: reproducibility is
+a property of the commit, not of the working tree, so a hand-edited vendored
+file whose checksum was re-recorded to match it passes verification happily
+and is still unreproducible from the manifest.
+
+```yaml
+jobs:
+  vendor:
+    uses: pedrobtz/r-actions/.github/workflows/vendor.yml@v1
+```
+
+Optional inputs:
+
+```yaml
+    with:
+      vendor-dir: src/vendor                  # default
+      verify: tools/vendor/verify             # default; skipped if absent
+      must-update: |                          # default
+        tools/vendor/manifest.tsv
+        tools/vendor/checksums.sha256
+```
+
 ### `valgrind.yml` — Valgrind
 
 Runs `R CMD check --use-valgrind` under R-release, then **scans the check
