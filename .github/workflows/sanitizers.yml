@@ -52,13 +52,18 @@ on:
         description: >
           Shell command for the `asan` job to run instead of `R CMD check`.
 
-          Worth reaching for. `R CMD check` in these images builds every
-          Suggests dependency from source under the sanitizer, which is slow
-          and occasionally fails for reasons that have nothing to do with the
-          package under test. A small driver that exercises the compiled code
-          with base R only -- error paths especially, where an R-level longjmp
-          skips whatever C had allocated -- runs in a minute and is what the
-          sanitizer actually cares about.
+          The default path is fine for most packages -- measured at about two
+          minutes on a package with five Suggests, which pak resolved as
+          binaries from the image's own repository rather than building them.
+          Reach for this when that does not hold: a Suggests with no binary
+          for the image, a suite too slow to run instrumented, or a package
+          whose interesting paths are not the ones its tests spend time on.
+
+          A sanitizer earns its keep on error and unwind paths -- where an
+          R-level longjmp skips whatever C had allocated -- and an ordinary
+          suite exercises those only incidentally. A small driver aimed at
+          them, using base R only, needs no dependencies at all: pair this
+          with asan-dependencies: false.
 
           Whatever it prints is scanned for sanitizer diagnostics, and a
           non-zero exit fails the job.
@@ -68,10 +73,14 @@ on:
       asan-dependencies:
         description: >
           Install the package's dependencies in the `asan` job. Suggests are
-          included, because `R CMD check` treats a missing one as an ERROR.
-          Turn it off when `asan-run` needs nothing but base R: under ASan
-          every dependency is compiled instrumented, which is the slowest part
-          of the job by a wide margin.
+          included, because `R CMD check` treats a missing one as an ERROR --
+          which is what this job did until it was run against a real package.
+
+          Turn it off when `asan-run` needs nothing but base R. Anything the
+          image's repository has no binary for is built from source, and a
+          dependency with compiled code is built instrumented, so the cost
+          varies from seconds to the whole job depending on what you depend
+          on.
         type: boolean
         required: false
         default: true

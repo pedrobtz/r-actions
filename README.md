@@ -119,14 +119,17 @@ jobs:
       asan-run: Rscript tools/sanitizer-exercise.R
 ```
 
-`asan-run` replaces `R CMD check` with a command of your own, and is worth
-reaching for. `R CMD check` in these images builds every Suggests dependency
-from source under the sanitizer, which is slow and occasionally fails for
-reasons unrelated to your package. A small driver that exercises the compiled
-code with base R only — error paths especially, where an R-level `longjmp`
-skips whatever C had allocated — runs in a minute and is what the sanitizer
-actually cares about. Pair it with `asan-dependencies: false` when the driver
-needs nothing but base R.
+`asan-run` replaces `R CMD check` with a command of your own. The default path
+is fine for most packages — measured at about two minutes on a package with
+five Suggests, which pak resolved as binaries from the image's own repository
+rather than building them. Reach for `asan-run` when that does not hold: a
+Suggests with no binary for the image, a suite too slow to run instrumented,
+or a package whose interesting paths are not the ones its tests spend time on.
+
+A sanitizer earns its keep on error and unwind paths — where an R-level
+`longjmp` skips whatever C had allocated — and an ordinary suite exercises
+those only incidentally. A driver aimed at them needs no dependencies at all,
+so pair it with `asan-dependencies: false`.
 
 ### `valgrind.yml` — Valgrind
 
