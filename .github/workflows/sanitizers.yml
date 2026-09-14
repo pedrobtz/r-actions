@@ -1,23 +1,62 @@
 on:
   workflow_call:
+    inputs:
+      env:
+        description: >
+          Extra environment variables for the check step, one NAME=VALUE per
+          line. Exists so a caller can opt into test paths that are normally
+          skipped -- an exhaustive sweep behind a package's own
+          PKG_SLOW_TESTS flag, say. Without it a caller who wants that has to
+          copy this whole job, and a copied sanitizer job is one that stops
+          being maintained.
+
+          Do not put secrets here: workflow inputs are not masked in logs.
+        type: string
+        required: false
+        default: ""
+      r-version:
+        description: >
+          R version to test against. Defaults to devel, which is where new
+          UB tends to surface first.
+        type: string
+        required: false
+        default: devel
+      timeout-minutes:
+        description: >
+          Job timeout in minutes. An instrumented build is several times
+          slower than an ordinary one, and the suite runs slower still.
+        type: number
+        required: false
+        default: 60
 
 name: sanitizers
 
 permissions: read-all
 
 jobs:
+  # UndefinedBehaviorSanitizer only, and deliberately so.
+  #
+  # ASan instruments a package .so perfectly well, but that .so is dlopen'd
+  # into an R that is not itself instrumented. Making that work needs
+  # -shared-libasan, an LD_PRELOAD of the runtime into R, and
+  # detect_leaks=0 -- R does not free on exit, so leak detection reports the
+  # interpreter rather than the package. Half-configured, as this job was, it
+  # reports nothing useful; fully configured it is fragile across R versions.
+  # ASan belongs where the C code links into an actual executable: a fuzz
+  # target or a standalone driver. UBSan has no such problem, because its
+  # runtime can arrive by DT_NEEDED at dlopen time.
   sanitizers:
     runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       R_KEEP_PKG_SOURCE: yes
-      CC: clang
-      CXX: clang++
-      CFLAGS: -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
-      CXXFLAGS: -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
-      LDFLAGS: -fsanitize=address,undefined
-      ASAN_OPTIONS: detect_leaks=1:strict_init_order=1
-      UBSAN_OPTIONS: print_stacktrace=1
+      # halt_on_error is not optional. Without it UBSan prints a diagnostic
+      # to stderr and carries on, R CMD check sees a successful run, and the
+      # job is green with findings in the log that nobody reads.
+      # -fno-sanitize-recover=undefined below is the compile-side half of the
+      # same thing.
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
 
     steps:
       - uses: actions/checkout@v4
@@ -29,13 +68,91 @@ jobs:
 
       - uses: r-lib/actions/setup-r@v2
         with:
-          r-version: devel
+          r-version: ${{ inputs.r-version }}
           http-user-agent: release
 
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           extra-packages: any::rcmdcheck
           needs: check
+
+      # These MUST go in ~/.R/Makevars, not the environment.
+      #
+      # R's etc/Makeconf assigns CFLAGS, CXXFLAGS *and* LDFLAGS with `=`, and
+      # make prefers a makefile assignment over an environment variable of
+      # the same name. Setting them as env vars -- which is what this job did
+      # -- therefore builds the package completely uninstrumented, and the
+      # job passes without having checked anything at all.
+      #
+      # LDFLAGS matters as much as CFLAGS: instrumented objects linked into a
+      # .so with no runtime fail at load with `undefined symbol: __ubsan_*`.
+      # clang links no sanitizer runtime into a -shared output by default, so
+      # -shared-libsan plus an rpath to the runtime directory is what lets
+      # the .so resolve it at dlopen time.
+      - name: Configure sanitizer flags
+        run: |
+          set -euo pipefail
+          RTLIB="$(clang -print-runtime-dir)"
+          mkdir -p ~/.R
+          {
+            echo "CC = clang"
+            echo "CXX = clang++"
+            echo "CFLAGS = -g -O1 -fsanitize=undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+            echo "CXXFLAGS = -g -O1 -fsanitize=undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+            echo "LDFLAGS = -fsanitize=undefined -shared-libsan -Wl,-rpath,${RTLIB}"
+          } >> ~/.R/Makevars
+          echo "--- ~/.R/Makevars ---"
+          cat ~/.R/Makevars
+
+      # Verify the detector actually got built in, rather than trusting that
+      # passing a flag made it so. This checks the *installed* .so, not the
+      # build log: the log records the command that was meant to produce the
+      # object, which is exactly what was wrong before.
+      #
+      # A package with no compiled code has nothing to instrument, and says
+      # so rather than failing.
+      - name: Install and verify instrumentation
+        run: |
+          set -euo pipefail
+          if [ ! -d src ]; then
+            echo "No src/ directory: nothing to instrument."
+            exit 0
+          fi
+          LIB="$(mktemp -d)"
+          R CMD INSTALL --library="$LIB" --preclean .
+          found=0
+          for so in "$LIB"/*/libs/*.so; do
+            [ -e "$so" ] || continue
+            found=1
+            echo "== $so"
+            # Dynamic and full symbol tables both, so this holds whether the
+            # runtime is linked shared (handlers undefined, resolved at load)
+            # or static (handlers defined in the object).
+            if { nm -D "$so" 2>/dev/null; nm "$so" 2>/dev/null; } \
+                 | grep -q '__ubsan'; then
+              echo "   ok: UBSan runtime is referenced"
+            else
+              echo "   FAIL: no __ubsan* symbols; the build was not instrumented" >&2
+              echo "   (flags must reach the compiler via ~/.R/Makevars, not the environment)" >&2
+              exit 1
+            fi
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "No shared object was installed; nothing to verify." >&2
+            exit 1
+          fi
+
+      - name: Apply caller environment
+        if: inputs.env != ''
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${{ inputs.env }}" | while IFS= read -r line; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+              *) echo "Ignoring malformed env line: $line" >&2 ;;
+            esac
+          done
 
       - name: Run R CMD check with sanitizers
         shell: Rscript {0}

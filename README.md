@@ -43,18 +43,44 @@ To display the badge in your README, add the following line (replacing
 ![Coverage]({owner}/{repo}/raw/main/.github/badges/coverage.svg)
 ```
 
-### `sanitizers.yml` — AddressSanitizer + UndefinedBehaviorSanitizer
+### `sanitizers.yml` — UndefinedBehaviorSanitizer
 
-Builds and checks the package under R-devel with clang, ASAN, and UBSAN enabled.
-Detects memory errors (heap overflows, use-after-free, memory leaks) and
-undefined behaviour (signed integer overflow, misaligned pointers, etc.).
-Mirrors CRAN's "Additional issues: ASAN/UBSAN" flavor.
+Builds and checks the package under R-devel with clang and UBSan, catching
+signed integer overflow, misaligned pointers, invalid casts and similar. The
+job **halts** on a finding, and verifies with `nm` that the installed shared
+object really is instrumented before running the suite.
 
 ```yaml
 jobs:
   sanitizers:
     uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
 ```
+
+Optional inputs:
+
+```yaml
+jobs:
+  sanitizers:
+    uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
+    with:
+      r-version: devel        # default
+      timeout-minutes: 60     # default
+      env: |                  # extra env for the check step
+        MYPKG_SLOW_TESTS=true
+```
+
+**Why no ASan here.** ASan instruments a package `.so` fine, but that `.so` is
+`dlopen`'d into an R that is not itself instrumented. Making that work needs
+`-shared-libasan`, an `LD_PRELOAD` of the runtime into R, and
+`detect_leaks=0` — R does not free on exit, so leak detection reports the
+interpreter rather than your package. Half-configured it finds nothing; fully
+configured it is fragile across R versions. ASan belongs where the C code
+links into a real executable: a libFuzzer target or a standalone replay
+driver. UBSan has no such problem, because its shared runtime can arrive by
+`DT_NEEDED` at `dlopen` time.
+
+For heap errors in an R package, `valgrind.yml` below is the job that covers
+that ground.
 
 ### `valgrind.yml` — Valgrind
 
