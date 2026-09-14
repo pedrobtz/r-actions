@@ -1,5 +1,13 @@
 on:
   workflow_call:
+    inputs:
+      timeout-minutes:
+        description: >
+          Job timeout in minutes. Valgrind runs the code on a synthetic CPU,
+          so expect the suite to take tens of times longer than usual.
+        type: number
+        required: false
+        default: 60
 
 name: valgrind
 
@@ -8,6 +16,7 @@ permissions: read-all
 jobs:
   valgrind:
     runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       R_KEEP_PKG_SOURCE: yes
@@ -29,11 +38,53 @@ jobs:
           extra-packages: any::rcmdcheck
           needs: check
 
+      # check_dir is not cosmetic: rcmdcheck defaults to a temporary
+      # directory, and the valgrind findings are in the .Rout files inside it.
+      # Without a known path there is nothing for the next step to read.
       - name: Run R CMD check under valgrind
         shell: Rscript {0}
         run: |
           rcmdcheck::rcmdcheck(
             args = c("--no-manual", "--as-cran", "--use-valgrind"),
             build_args = c("--no-manual"),
+            check_dir = "check",
             error_on = "warning"
           )
+
+      # R CMD check does not fail on a valgrind finding. Valgrind writes to
+      # the .Rout files, check reads them for R errors only, and the job goes
+      # green with "definitely lost" in a log nobody opens. This is the same
+      # gap sanitizers.yml closes with halt_on_error, and the same one R-hub's
+      # own container scripts close by grepping the check output -- valgrind
+      # has no equivalent of halt_on_error, so grepping is the only way.
+      #
+      # "ERROR SUMMARY: 0 errors" is the ordinary line and must not match.
+      - name: Scan for valgrind findings
+        if: always()
+        run: |
+          set -eu
+          logs=$(find check -name '*.Rout' -o -name '*.Rout.fail' 2>/dev/null || true)
+          if [ -z "$logs" ]; then
+            echo "No check output to scan." >&2
+            exit 1
+          fi
+          pattern='ERROR SUMMARY: [1-9]|definitely lost: [1-9]|indirectly lost: [1-9]|Invalid read|Invalid write|Invalid free|Mismatched free|uninitialised value|Conditional jump or move depends'
+          hits=$(grep -lE "$pattern" $logs || true)
+          if [ -n "$hits" ]; then
+            for f in $hits; do
+              echo "----------------------------------------------------------"
+              echo "$f"
+              echo "----------------------------------------------------------"
+              grep -E -A 12 "$pattern" "$f" || true
+            done
+            echo "::error::valgrind reported a memory error or leak"
+            exit 1
+          fi
+          echo "valgrind reported no errors or leaks."
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: valgrind-check
+          path: check
+          if-no-files-found: ignore

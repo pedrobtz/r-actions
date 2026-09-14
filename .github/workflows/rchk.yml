@@ -1,5 +1,20 @@
 on:
   workflow_call:
+    inputs:
+      fail-on-findings:
+        description: >
+          Fail the job when rchk reports anything, instead of warning and
+          uploading the output.
+
+          The default stays informational because rchk reports false
+          positives that need human judgement, and a package meeting it for
+          the first time should not have its build blocked while it works
+          through them. Once a package is at zero findings the calculation
+          reverses: the next one is a regression, and a warning nobody opens
+          is not how you learn about it. Turn this on then.
+        type: boolean
+        required: false
+        default: false
 
 name: rchk
 
@@ -26,8 +41,21 @@ jobs:
           tarball=$(ls rchk-packages)
           docker run --rm -v "$(pwd)/rchk-packages":/rchk/packages \
             kalibera/rchk:latest "/rchk/packages/${tarball}" | tee rchk-output.txt
+
+      - name: Report
+        if: always()
+        run: |
+          set -eu
+          if [ ! -f rchk-output.txt ]; then
+            echo "rchk produced no output." >&2
+            exit 1
+          fi
           echo "----- rchk summary -----"
           if grep -E "Function |unprotected|negative depth|imbalanced|too many" rchk-output.txt; then
+            if [ "${{ inputs.fail-on-findings }}" = "true" ]; then
+              echo "::error::rchk reported potential PROTECT issues"
+              exit 1
+            fi
             echo "::warning::rchk reported potential PROTECT issues; review the rchk-output artifact"
           else
             echo "rchk found no PROTECT issues."
