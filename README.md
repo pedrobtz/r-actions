@@ -79,54 +79,54 @@ links into a real executable: a libFuzzer target or a standalone replay
 driver. UBSan has no such problem, because its shared runtime can arrive by
 `DT_NEEDED` at `dlopen` time.
 
-For heap errors in an R package, `valgrind.yml` below is the job that covers
-that ground.
+For heap errors in an R package, `valgrind.yml` below covers that ground on an
+ordinary runner, and the `asan` job below covers it where ASan does work.
 
-### `asan.yml` — AddressSanitizer, in the R-hub containers
+#### The `asan` job — AddressSanitizer, in the R-hub containers
 
-Runs the package under ASan inside `ghcr.io/r-hub/containers/clang-asan` and
+Off by default. `asan: true` adds a second job to this workflow that runs the
+package under ASan inside `ghcr.io/r-hub/containers/clang-asan` and
 `gcc-asan`, verifies with `nm` that the installed shared object really is
 instrumented, and fails on a diagnostic in the output as well as on a non-zero
 exit.
 
 ```yaml
 jobs:
-  asan:
-    uses: pedrobtz/r-actions/.github/workflows/asan.yml@v1
+  sanitizers:
+    uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
+    with:
+      asan: true
 ```
 
-**Why ASan works here and not in `sanitizers.yml`.** That job's reasoning —
-a package `.so` is `dlopen`'d into an R that is not itself instrumented, so
-ASan needs `-shared-libasan`, the runtime preloaded into R, and
-`detect_leaks=0` — is correct for an ordinary runner. These images have
-already done all three: `clang-asan` ships an R that is itself a `devel-asan`
-build, and `gcc-asan` `LD_PRELOAD`s `libasan` from inside the `R` and
-`Rscript` wrappers with `ASAN_OPTIONS='detect_leaks=0'` set image-wide. Their
-R also compiles packages with `-fsanitize=address,undefined` from its own
-`Makeconf`, so this job passes no sanitizer flags of its own.
+Everything the note above says is true of an ordinary runner. These images
+have already done all three things it lists: `clang-asan` ships an R that is
+itself a `devel-asan` build, and `gcc-asan` `LD_PRELOAD`s `libasan` from
+inside the `R` and `Rscript` wrappers with `ASAN_OPTIONS='detect_leaks=0'` set
+image-wide. Their R also compiles packages with
+`-fsanitize=address,undefined` from its own `Makeconf`, so this job passes no
+sanitizer flags of its own.
 
 Optional inputs:
 
 ```yaml
 jobs:
-  asan:
-    uses: pedrobtz/r-actions/.github/workflows/asan.yml@v1
+  sanitizers:
+    uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
     with:
-      containers: '["clang-asan", "gcc-asan", "clang-ubsan"]'  # default: the two asan images
-      dependencies: false      # skip installing deps; default true
-      timeout-minutes: 60      # default
-      env: |
-        MYPKG_SLOW_TESTS=true
-      run: Rscript tools/sanitizer-exercise.R
+      asan: true
+      asan-containers: '["clang-asan", "gcc-asan"]'   # default
+      asan-dependencies: false                        # default true
+      asan-run: Rscript tools/sanitizer-exercise.R
 ```
 
-`run` replaces `R CMD check` with a command of your own. It is worth reaching
-for: `R CMD check` in these images builds every Suggests dependency from
-source under the sanitizer, which is slow and occasionally fails for reasons
-unrelated to your package. A small driver that exercises the compiled code
-with base R only — error paths especially, where an R-level `longjmp` skips
-whatever C had allocated — runs in a minute and is what the sanitizer actually
-cares about.
+`asan-run` replaces `R CMD check` with a command of your own, and is worth
+reaching for. `R CMD check` in these images builds every Suggests dependency
+from source under the sanitizer, which is slow and occasionally fails for
+reasons unrelated to your package. A small driver that exercises the compiled
+code with base R only — error paths especially, where an R-level `longjmp`
+skips whatever C had allocated — runs in a minute and is what the sanitizer
+actually cares about. Pair it with `asan-dependencies: false` when the driver
+needs nothing but base R.
 
 ### `valgrind.yml` — Valgrind
 

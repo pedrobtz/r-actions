@@ -42,6 +42,23 @@ jobs:
           docker run --rm -v "$(pwd)/rchk-packages":/rchk/packages \
             kalibera/rchk:latest "/rchk/packages/${tarball}" | tee rchk-output.txt
 
+      # The pattern matters more than it looks.
+      #
+      # It used to include "too many", which matches rchk's
+      #
+      #   ERROR: too many states (abstraction error?) in function bcEval_loop
+      #
+      # Those functions -- bcEval_loop, RunGenCollect, strptime_internal --
+      # are R's own, not the package's: rchk analyses the package linked
+      # against R, and this line means it hit its own abstraction limit and
+      # gave up on a function, not that it found anything. It appears for
+      # essentially every package, so the old pattern warned on every run and
+      # the warning meant nothing. With fail-on-findings it would fail every
+      # run instead, which is how it was noticed.
+      #
+      # Real findings carry rchk's diagnostic tags -- [UP] unprotected, [PB]
+      # protect balance, [UPB] both -- and name a line in the package's own
+      # source. Those are what this matches.
       - name: Report
         if: always()
         run: |
@@ -51,7 +68,8 @@ jobs:
             exit 1
           fi
           echo "----- rchk summary -----"
-          if grep -E "Function |unprotected|negative depth|imbalanced|too many" rchk-output.txt; then
+          findings='\[UP\]|\[PB\]|\[UPB\]|unprotected|negative depth|imbalanced'
+          if grep -E "$findings" rchk-output.txt; then
             if [ "${{ inputs.fail-on-findings }}" = "true" ]; then
               echo "::error::rchk reported potential PROTECT issues"
               exit 1
@@ -59,6 +77,11 @@ jobs:
             echo "::warning::rchk reported potential PROTECT issues; review the rchk-output artifact"
           else
             echo "rchk found no PROTECT issues."
+          fi
+          # Reported, never failed: this is analysis coverage, not a result.
+          if grep -E "too many states" rchk-output.txt; then
+            echo "::notice::rchk hit its abstraction limit on the functions above" \
+                 "and did not analyse them; these are usually R's own."
           fi
 
       - uses: actions/upload-artifact@v4
