@@ -8,6 +8,27 @@ on:
         type: number
         required: false
         default: 60
+      valgrind-opts:
+        description: >
+          Extra valgrind options, delivered through VALGRIND_OPTS so they reach
+          the valgrind that `R CMD check --use-valgrind` starts. R's own
+          invocation does not set --leak-check=full, so a "definitely lost"
+          finding arrives as a total with no stack and cannot be attributed
+          from the artifact; pass "--leak-check=full --track-origins=yes" to
+          get the stacks.
+        type: string
+        required: false
+        default: ""
+      cppflags:
+        description: >
+          Extra preprocessor flags for this job's build only, appended to
+          CPPFLAGS through ~/.R/Makevars. The case this exists for is
+          -DENABLE_MEMCHECK: a vendored library that writes deliberately
+          uninitialised page padding can then annotate those bytes for
+          valgrind instead of having every commit reported.
+        type: string
+        required: false
+        default: ""
 
 name: valgrind
 
@@ -41,8 +62,22 @@ jobs:
       # check_dir is not cosmetic: rcmdcheck defaults to a temporary
       # directory, and the valgrind findings are in the .Rout files inside it.
       # Without a known path there is nothing for the next step to read.
+      # ~/.R/Makevars is read after etc/Makeconf, so `+=` appends to R's own
+      # CPPFLAGS rather than replacing them. Only for this build: the runner
+      # is disposable.
+      - name: Extra CPPFLAGS for this build
+        if: inputs.cppflags != ''
+        run: |
+          mkdir -p ~/.R
+          printf 'CPPFLAGS += %s\n' '${{ inputs.cppflags }}' >> ~/.R/Makevars
+          cat ~/.R/Makevars
+
+      # VALGRIND_OPTS is read by valgrind itself, ahead of its command line,
+      # so this reaches the instance R starts without changing how R starts it.
       - name: Run R CMD check under valgrind
         shell: Rscript {0}
+        env:
+          VALGRIND_OPTS: ${{ inputs.valgrind-opts }}
         run: |
           rcmdcheck::rcmdcheck(
             args = c("--no-manual", "--as-cran", "--use-valgrind"),
@@ -68,7 +103,10 @@ jobs:
             echo "No check output to scan." >&2
             exit 1
           fi
-          pattern='ERROR SUMMARY: [1-9]|definitely lost: [1-9]|indirectly lost: [1-9]|Invalid read|Invalid write|Invalid free|Mismatched free|uninitialised value|Conditional jump or move depends'
+          # "are definitely lost in loss record" is the per-leak line that
+          # --leak-check=full adds, and the stack follows it -- matching it is
+          # what puts the stack in this log rather than only in the artifact.
+          pattern='ERROR SUMMARY: [1-9]|definitely lost: [1-9]|indirectly lost: [1-9]|are definitely lost in loss record|Invalid read|Invalid write|Invalid free|Mismatched free|uninitialised value|Conditional jump or move depends'
           hits=$(grep -lE "$pattern" $logs || true)
           if [ -n "$hits" ]; then
             for f in $hits; do
