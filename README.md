@@ -167,8 +167,8 @@ jobs:
 
 ### `gctorture.yml` — GC Torture
 
-Runs the test suite under R-release with `gctorture2(step = 20)`, which forces
-a garbage collection every 20 allocations. Any unprotected `SEXP` that lives
+Runs the test suite under R-release with `gctorture2()`, forcing a garbage
+collection every `step` allocations (20 by default). Any unprotected `SEXP` that lives
 across an allocating call will corrupt memory and surface as a test failure or
 crash. Runtime complement to the static `rchk` job.
 
@@ -178,9 +178,32 @@ jobs:
     uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@v1
 ```
 
-The job times out after 120 minutes by default. Because a GC every 20
-allocations makes everything slow, a package with large test data can exceed
-that; raise the limit with the `timeout-minutes` input:
+**Raise `step` before you raise the timeout.** Cost scales as roughly
+`1/step`, and the measurements are not close — on a package with a
+3,000-assertion suite, one test file took 97s at step 20, 11s at 100 and 2.6s
+at 500, and its whole suite took 88 to 107 minutes at 20:
+
+```yaml
+jobs:
+  gctorture:
+    uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@v1
+    with:
+      step: 100
+```
+
+What a larger step gives up is sensitivity, not coverage: every path still
+runs, and a suite of any size still forces many thousands of collections. An
+unprotected `SEXP` is caught when a collection lands while it is live, so a
+larger step widens the window it can hide in. Prefer 100 over not running this
+job at all.
+
+Most of that cost is not your package. `expect_*()` allocates heavily —
+comparison, condition objects, srcrefs — so on the measurement above, 40 raw
+parse-and-emit cycles cost 2.6s at step 20 while 44 assertions cost 97s. Which
+is also why gating a few slow tests moves the total far less than `step` does.
+
+The job times out after 120 minutes by default; raise it with the
+`timeout-minutes` input:
 
 ```yaml
 jobs:
