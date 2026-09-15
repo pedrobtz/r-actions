@@ -19,6 +19,17 @@ on:
         type: string
         required: false
         default: ""
+      suppressions:
+        description: >
+          Path to a valgrind suppression file, relative to the repository root.
+          Resolved against the workspace here rather than passed through
+          valgrind-opts, because valgrind resolves a relative --suppressions
+          against its own working directory -- which for the tests is the
+          .Rcheck tests directory, not the checkout, so a caller cannot write a
+          path that works.
+        type: string
+        required: false
+        default: ""
       cppflags:
         description: >
           Extra preprocessor flags for this job's build only, appended to
@@ -77,7 +88,11 @@ jobs:
       - name: Run R CMD check under valgrind
         shell: Rscript {0}
         env:
-          VALGRIND_OPTS: ${{ inputs.valgrind-opts }}
+          VALGRIND_OPTS: >-
+            ${{ inputs.valgrind-opts }}
+            ${{ inputs.suppressions != ''
+                && format('--suppressions={0}/{1}', github.workspace, inputs.suppressions)
+                || '' }}
         run: |
           rcmdcheck::rcmdcheck(
             args = c("--no-manual", "--as-cran", "--use-valgrind"),
