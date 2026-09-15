@@ -6,17 +6,25 @@ on:
           Force a garbage collection every `step` allocations. The default of
           20 is R's own recommendation and the most sensitive setting.
 
-          Raise it when the job does not finish. Cost scales as roughly 1/step
-          and the measurements are not close: on a package with a 3,000-
-          assertion suite, one test file took 97s at step 20, 11s at 100 and
-          2.6s at 500 -- and its whole suite took 88 to 107 minutes at 20,
-          which extrapolates to 10 to 12 at 100.
+          Raise it when the job takes longer than anyone will wait for. Cost
+          is close to F + K/step, where F is the fixed setup the torture
+          setting does not affect -- checkout, dependency install, compile.
+          Measured on a package with a 3,000-assertion suite, both runs from
+          the same commit and runner image: 82m30s at step 20 and 18m38s at
+          step 100, which fits F = 2.6 minutes and K = 1598. That package now
+          runs step 300, just under 8 minutes.
+
+          Extrapolate from two full-suite measurements, not from one test
+          file. Timing a single file here predicted 10 to 12 minutes at step
+          100 and the real figure was nearly twice that, because per-file
+          timings miss both the fixed setup and the files that dominate.
 
           What you give up is sensitivity, not coverage: every path still
           runs, and a suite of any size still forces many thousands of
-          collections. An unprotected SEXP is caught when a collection lands
-          while it is live, so a larger step widens the window it can hide in.
-          Prefer 100 over not running this job at all.
+          collections. An unprotected SEXP is caught only when a collection
+          lands while it is live, so a larger step widens the window it can
+          hide in. Prefer a wide step over not running this job at all, and
+          pair it with a weekly run at 20 if the budget allows.
         type: number
         required: false
         default: 20
