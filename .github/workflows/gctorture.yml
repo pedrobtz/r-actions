@@ -7,17 +7,19 @@ on:
           20 is R's own recommendation and the most sensitive setting.
 
           Raise it when the job takes longer than anyone will wait for. Cost
-          is close to F + K/step, where F is the fixed setup the torture
-          setting does not affect -- checkout, dependency install, compile.
-          Measured on a package with a 3,000-assertion suite, both runs from
-          the same commit and runner image: 82m30s at step 20 and 18m38s at
-          step 100, which fits F = 2.6 minutes and K = 1598. That package now
-          runs step 300, just under 8 minutes.
+          falls steeply at first and then flattens, because a fixed part of
+          the job -- checkout, dependency install, compile -- is not affected
+          by the setting at all. Measured on a package with a 3,000-assertion
+          suite, one run each on the same runner image: 82m30s at step 20,
+          18m38s at 100, 9m52s at 300, 5m44s at 500.
 
-          Extrapolate from two full-suite measurements, not from one test
-          file. Timing a single file here predicted 10 to 12 minutes at step
-          100 and the real figure was nearly twice that, because per-file
-          timings miss both the fixed setup and the files that dominate.
+          Measure a candidate rather than predicting one. Two attempts to fit
+          those numbers to a fixed cost plus a 1/step term missed by about a
+          quarter in one direction and a third in the other, and timing a
+          single test file instead of the suite was worse still: it predicted
+          10 to 12 minutes at step 100 where the real figure was 18m38s. Each
+          measurement is a single sample and runner variance is the same size
+          as the effect, so a curve through them mostly fits noise.
 
           What you give up is sensitivity, not coverage: every path still
           runs, and a suite of any size still forces many thousands of
