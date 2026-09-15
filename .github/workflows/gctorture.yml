@@ -1,9 +1,28 @@
 on:
   workflow_call:
     inputs:
+      step:
+        description: >
+          Force a garbage collection every `step` allocations. The default of
+          20 is R's own recommendation and the most sensitive setting.
+
+          Raise it when the job does not finish. Cost scales as roughly 1/step
+          and the measurements are not close: on a package with a 3,000-
+          assertion suite, one test file took 97s at step 20, 11s at 100 and
+          2.6s at 500 -- and its whole suite took 88 to 107 minutes at 20,
+          which extrapolates to 10 to 12 at 100.
+
+          What you give up is sensitivity, not coverage: every path still
+          runs, and a suite of any size still forces many thousands of
+          collections. An unprotected SEXP is caught when a collection lands
+          while it is live, so a larger step widens the window it can hide in.
+          Prefer 100 over not running this job at all.
+        type: number
+        required: false
+        default: 20
       timeout-minutes:
         description: >
-          Job timeout in minutes. gctorture2(step = 20) forces a garbage
+          Job timeout in minutes. gctorture2() forces a garbage
           collection every 20 allocations, so a suite that normally runs in
           seconds can take tens of minutes here, and one with large test
           data can take hours. Raise this for such a package, or better,
@@ -44,5 +63,5 @@ jobs:
       - name: Run tests under gctorture
         shell: Rscript {0}
         run: |
-          gctorture2(step = 20)
+          gctorture2(step = ${{ inputs.step }})
           testthat::test_local(stop_on_failure = TRUE)
