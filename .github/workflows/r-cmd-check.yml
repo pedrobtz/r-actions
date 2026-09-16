@@ -1,0 +1,256 @@
+# R CMD check, on GitHub's runners and in the CRAN-like containers.
+#
+# One workflow rather than two, because these are the same check -- the same
+# `R CMD check --as-cran`, the same failure conditions -- run on different
+# toolchains. Splitting them duplicates every R-level check (Rd, examples,
+# tests, URLs, policy) in a second workflow whose logs nobody correlates with
+# the first.
+#
+# The two jobs answer different halves of CRAN's flavor list
+# (https://cran.r-project.org/web/checks/check_flavors.html):
+#
+# `runners` covers the OS and R-version spread -- macOS and Windows, which
+# have no container, and the release/oldrel legs. Its compilers are close
+# enough to CRAN's: Windows is Rtools GCC either way, and the macOS runner is
+# Apple clang like r-release-macos-arm64.
+#
+# `containers` covers what a GitHub runner cannot reach: the two r-devel Linux
+# flavors, which differ from any runner in the compiler.
+#
+#   r-devel-linux-x86_64-debian-clang   clang 23, with C built as -std=gnu23
+#   r-devel-linux-x86_64-debian-gcc     GCC 16
+#
+# ubuntu-latest carries neither -- its clang still defaults to C17 and its GCC
+# is several majors behind -- so a diagnostic that exists only in the newer
+# compiler, or only in the newer language standard, stays invisible until
+# CRAN's incoming pretest reports it. That is a rejected submission rather
+# than a red check. The Fedora pair on the flavors page runs the same two
+# compiler versions as the Debian pair, so it adds little.
+#
+# This is why the default `runners` matrix has no R-devel Linux row: the
+# containers are R-devel on Linux, on the compilers CRAN actually uses. A row
+# pinning R-devel to the runner's own GCC matches no CRAN flavor at all.
+#
+# The containers matter most for a package that compiles bundled third-party
+# C. Upstream code is written against the compilers upstream tests on, and the
+# gap arrives as someone else's warnings in your check log.
+on:
+  workflow_call:
+    inputs:
+      runners:
+        description: >
+          JSON array of `{os, r}` objects for the `runners` job, each
+          optionally carrying `http-user-agent`. Set to '[]' to skip the job
+          entirely.
+
+          The default drops the R-devel Linux row that the standard
+          r-lib/actions template carries, because the `containers` job covers
+          that ground against CRAN's own compilers. Add it back if you want a
+          plain R-devel leg as insurance against a stale container image.
+        type: string
+        required: false
+        default: >-
+          [{"os": "macos-latest", "r": "release"},
+           {"os": "windows-latest", "r": "release"},
+           {"os": "ubuntu-latest", "r": "release"},
+           {"os": "ubuntu-latest", "r": "oldrel-1"}]
+      containers:
+        description: >
+          JSON array of R-hub container names for the `containers` job. Names
+          come from https://r-hub.github.io/containers/. Set to '[]' to skip
+          the job -- worth doing only for a package with no compiled code,
+          which has little to learn from a different compiler.
+
+          The default pair is the two CRAN-like images that differ from a
+          runner in the compiler. `ubuntu-next` and `ubuntu-release` are
+          CRAN-like too, but sit closer to what the `runners` job already
+          does.
+        type: string
+        required: false
+        default: '["ubuntu-clang", "ubuntu-gcc16"]'
+      args:
+        description: >
+          Check arguments, as an R expression. `--as-cran` is the point of
+          the exercise; dropping it makes this a different workflow.
+        type: string
+        required: false
+        default: 'c("--no-manual", "--as-cran")'
+      build-args:
+        description: >
+          Build arguments for the `runners` job, as an R expression. The
+          `containers` job does not take these: those images carry no LaTeX
+          and no vignette-compaction tooling.
+        type: string
+        required: false
+        default: 'c("--no-manual")'
+      timeout-minutes:
+        description: Job timeout in minutes, for both jobs.
+        type: number
+        required: false
+        default: 45
+      env:
+        description: >
+          Extra environment variables for the check steps, one NAME=VALUE per
+          line, as in sanitizers.yml.
+
+          Do not put secrets here: workflow inputs are not masked in logs.
+        type: string
+        required: false
+        default: ""
+
+name: R-CMD-check
+
+permissions: read-all
+
+jobs:
+  runners:
+    if: inputs.runners != '[]'
+    runs-on: ${{ matrix.config.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    name: ${{ matrix.config.os }} (${{ matrix.config.r }})
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJson(inputs.runners) }}
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-pandoc@v2
+
+      # http-user-agent is read from the matrix row and is simply empty for
+      # rows that omit it, which is what the r-lib template does too. It
+      # matters only for an R-devel row, where the default agent can resolve
+      # to packages built for the wrong R.
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.config.r }}
+          http-user-agent: ${{ matrix.config.http-user-agent }}
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::rcmdcheck
+          needs: check
+
+      - name: Apply caller environment
+        if: inputs.env != ''
+        shell: bash
+        env:
+          CALLER_ENV: ${{ inputs.env }}
+        run: |
+          set -eu
+          printf '%s\n' "$CALLER_ENV" | while IFS= read -r line; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+              *) echo "Ignoring malformed env line: $line" >&2 ;;
+            esac
+          done
+
+      - uses: r-lib/actions/check-r-package@v2
+        with:
+          args: ${{ inputs.args }}
+          build_args: ${{ inputs.build-args }}
+          upload-snapshots: true
+
+  containers:
+    if: inputs.containers != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    name: ${{ matrix.container }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        container: ${{ fromJson(inputs.containers) }}
+
+    container:
+      image: ghcr.io/r-hub/containers/${{ matrix.container }}:latest
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # This job exists because the compiler differs from the one every other
+      # job uses, so the log should say which compiler and which language
+      # standard actually ran. Without it the first question after a
+      # surprising result -- "is this image really the flavor I think it is?"
+      # -- costs a debugging round trip.
+      - name: Record the toolchain
+        run: |
+          set -eu
+          R --version | head -1
+          for v in CC CXX CFLAGS CXXFLAGS; do
+            printf '%s = %s\n' "$v" "$(R CMD config $v)"
+          done
+          # R keeps the C standard in CC itself (`clang-23 -std=gnu23`), not
+          # in CFLAGS, so ask the compiler rather than parsing the flag.
+          echo '--- as the compiler sees it ---'
+          printf 'int main(void){return 0;}\n' > /tmp/probe.c
+          $(R CMD config CC) $(R CMD config CFLAGS) -dM -E /tmp/probe.c \
+            | grep -E '__STDC_VERSION__|__clang_major__|^#define __GNUC__' || true
+
+      # dependencies = TRUE, so Suggests are included: R CMD check reports a
+      # missing Suggests as an ERROR, not a NOTE. _R_CHECK_FORCE_SUGGESTS_
+      # below is the backstop for any that still will not install.
+      - name: Install dependencies
+        run: |
+          set -eu
+          Rscript -e 'pak::local_install_deps(".", dependencies = TRUE, upgrade = FALSE)'
+          Rscript -e 'pak::pkg_install("any::rcmdcheck", upgrade = FALSE)'
+
+      - name: Apply caller environment
+        if: inputs.env != ''
+        env:
+          CALLER_ENV: ${{ inputs.env }}
+        run: |
+          set -eu
+          printf '%s\n' "$CALLER_ENV" | while IFS= read -r line; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+              *) echo "Ignoring malformed env line: $line" >&2 ;;
+            esac
+          done
+
+      # error_on = "warning" is the contract, and it is what check-r-package
+      # does on the other job by default. A compiler diagnostic in a package's
+      # own sources reaches R CMD check as the "significant warnings" WARNING
+      # under "checking whether package can be installed" -- exactly what
+      # CRAN's pretest rejects on, and exactly what a job failing only on
+      # ERROR would report green.
+      #
+      # build_args is fixed here rather than taken from the caller: these
+      # images carry no LaTeX, and vignette compaction needs tooling they do
+      # not have either. The PDF manual is platform-independent, and the
+      # macOS and Windows legs above build it. Note that a caller who
+      # overrides `args` without keeping --no-manual will hit the same wall
+      # from the check side.
+      - name: Run R CMD check
+        shell: Rscript {0}
+        env:
+          _R_CHECK_FORCE_SUGGESTS_: "false"
+        run: |
+          rcmdcheck::rcmdcheck(
+            args = ${{ inputs.args }},
+            build_args = c("--no-manual"),
+            error_on = "warning",
+            check_dir = "check"
+          )
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: check-${{ matrix.container }}
+          path: check
+          if-no-files-found: ignore
