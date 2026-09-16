@@ -57,16 +57,46 @@ the compilers CRAN actually uses; a row pinning R-devel to the runner's own
 GCC matches no CRAN flavor. Add it back if you want a plain R-devel leg as
 insurance against a stale container image.
 
+**The containers are overridden to compile the way CRAN does**, because out
+of the box they do not. Measured on the images themselves:
+
+| | `CC` | `CFLAGS` | `__STDC_VERSION__` |
+|---|---|---|---|
+| CRAN debian-clang | `clang-23 -std=gnu23` | `-g -O3 -Wall -pedantic` | 202311L |
+| `ubuntu-clang` | `clang-22` | `-g -O2` | **201710L** |
+| `ubuntu-gcc16` | `gcc-16 -std=gnu2x` | `-g -O2` | 202311L |
+
+`ubuntu-clang` ships with no `-std=` at all, so it compiles at C17 — and
+neither image passes `-pedantic`, which is what enables several of the
+diagnostics only CRAN reports. Unoverridden, that job gave a package a clean
+bill of health on sources CRAN had already rejected with four
+`-Wkeyword-macro` warnings.
+
+`container-makevars` closes it, appending to a user Makevars that R reads
+after its own `Makeconf`:
+
+```make
+CC     += -std=gnu23
+CFLAGS += -pedantic
+```
+
+`+=` rather than `=`, so the image keeps its own compiler and only gains the
+flags — that survives the image bumping clang versions. Set it to `""` to
+take the images exactly as they ship.
+
 Every container run logs the image's `CC`, `CXX`, flags and resulting
 `__STDC_VERSION__` before checking, so "is this image really the flavor I
 think it is?" is answerable from the log rather than from a debugging round
-trip.
+trip. That step is how the mismatch above was found.
 
 Optional inputs:
 
 ```yaml
     with:
       containers: '["ubuntu-clang", "ubuntu-gcc16"]'   # default; '[]' skips the job
+      container-makevars: |                            # default; "" takes images as-is
+        CC += -std=gnu23
+        CFLAGS += -pedantic
       runners: |                                       # default
         [{"os": "macos-latest", "r": "release"},
          {"os": "windows-latest", "r": "release"},

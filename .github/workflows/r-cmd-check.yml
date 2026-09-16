@@ -68,6 +68,30 @@ on:
         type: string
         required: false
         default: '["ubuntu-clang", "ubuntu-gcc16"]'
+      container-makevars:
+        description: >
+          Lines appended to a user Makevars for the `containers` job's check
+          step, to make the images compile the way CRAN does.
+
+          The default is not decoration. Measured on the images themselves:
+          ubuntu-clang is `clang-22` with no `-std=` at all, so it compiles
+          at __STDC_VERSION__ 201710L, while CRAN's debian-clang leg is
+          `clang-23 -std=gnu23`; and both images set CFLAGS to `-g -O2`,
+          where CRAN uses `-g -O3 -Wall -pedantic`. A container job without
+          this override is a weaker check than the runners it sits beside --
+          it reported a clean build on sources CRAN had already rejected.
+
+          `+=` rather than `=`, so the image keeps its own compiler and only
+          gains the flags; that survives the image bumping clang versions.
+          -pedantic rather than -Wall: several of the diagnostics that only
+          CRAN sees, -Wkeyword-macro among them, are pedantic-only.
+
+          Set to "" to take the images exactly as they ship.
+        type: string
+        required: false
+        default: |
+          CC += -std=gnu23
+          CFLAGS += -pedantic
       args:
         description: >
           Check arguments, as an R expression. `--as-cran` is the point of
@@ -222,6 +246,26 @@ jobs:
               *) echo "Ignoring malformed env line: $line" >&2 ;;
             esac
           done
+
+      # Written here rather than exported as CC/CFLAGS: R reads a user
+      # Makevars after its own Makeconf, which is what makes `+=` append to
+      # the image's compiler instead of replacing it. Environment CC/CFLAGS
+      # would have to restate the whole value and would pin the clang major.
+      - name: Compile the way CRAN does
+        if: inputs.container-makevars != ''
+        env:
+          MAKEVARS: ${{ inputs.container-makevars }}
+        run: |
+          set -eu
+          mkdir -p "${HOME}/.R"
+          printf '%s\n' "$MAKEVARS" > "${HOME}/.R/Makevars.cran"
+          echo "--- ${HOME}/.R/Makevars.cran ---"
+          cat "${HOME}/.R/Makevars.cran"
+          # Through GITHUB_ENV, not a ${{ }} expression on the check step:
+          # HOME is a runner environment variable and is not in the `env`
+          # context, so `env.HOME` there would expand to nothing and the
+          # override would be silently skipped.
+          echo "R_MAKEVARS_USER=${HOME}/.R/Makevars.cran" >> "$GITHUB_ENV"
 
       # error_on = "warning" is the contract, and it is what check-r-package
       # does on the other job by default. A compiler diagnostic in a package's
