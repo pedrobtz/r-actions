@@ -61,13 +61,20 @@ on:
           the job -- worth doing only for a package with no compiled code,
           which has little to learn from a different compiler.
 
-          The default pair is the two CRAN-like images that differ from a
-          runner in the compiler. `ubuntu-next` and `ubuntu-release` are
-          CRAN-like too, but sit closer to what the `runners` job already
-          does.
+          The default is the CRAN-like images that differ from a runner in
+          the compiler. `ubuntu-next` and `ubuntu-release` are CRAN-like
+          too, but sit closer to what the `runners` job already does.
+
+          Both clang images, because neither matches CRAN's debian-clang on
+          every axis and they fail differently. clang23 has the right
+          compiler major and CRAN's own -O3 -Wall -pedantic, but builds C++
+          against libc++ where CRAN uses libstdc++. ubuntu-clang has the
+          right C++ standard library and is the image r-hub badges as that
+          flavor, but is pinned to clang 22 and ships no -pedantic. Together
+          they bracket it.
         type: string
         required: false
-        default: '["ubuntu-clang", "ubuntu-gcc16"]'
+        default: '["clang23", "ubuntu-clang", "ubuntu-gcc16"]'
       container-makevars:
         description: >
           Lines appended to a user Makevars for the `containers` job's check
@@ -85,6 +92,12 @@ on:
           gains the flags; that survives the image bumping clang versions.
           -pedantic rather than -Wall: several of the diagnostics that only
           CRAN sees, -Wkeyword-macro among them, are pedantic-only.
+
+          These lines are appended to whatever user Makevars the image
+          already uses. They are never written somewhere new and pointed at
+          with R_MAKEVARS_USER, because that variable replaces the user
+          Makevars rather than adding to it, and an image that configures
+          its whole toolchain there would lose it.
 
           Set to "" to take the images exactly as they ship.
         type: string
@@ -247,25 +260,43 @@ jobs:
             esac
           done
 
-      # Written here rather than exported as CC/CFLAGS: R reads a user
-      # Makevars after its own Makeconf, which is what makes `+=` append to
-      # the image's compiler instead of replacing it. Environment CC/CFLAGS
-      # would have to restate the whole value and would pin the clang major.
+      # Appended to whatever user Makevars the image already uses, never
+      # pointed somewhere new. R_MAKEVARS_USER *replaces* the user Makevars
+      # rather than supplementing it, and some images configure themselves
+      # entirely through it: clang23 sets ENV R_MAKEVARS_USER=/root/.R/Makevars
+      # and puts CC=clang-23 in that file rather than patching Makeconf.
+      # Repointing the variable there silently threw the image's whole
+      # toolchain away and fell back to Makeconf's gcc -- a container named
+      # clang23 quietly checking with GCC, and passing.
+      #
+      # `+=` then does the right thing in both shapes: against clang23's
+      # `CC=clang-23` it yields CRAN's own `clang-23 -std=gnu23`, and against
+      # an image that patches Makeconf instead it appends to that.
       - name: Compile the way CRAN does
         if: inputs.container-makevars != ''
         env:
           MAKEVARS: ${{ inputs.container-makevars }}
         run: |
           set -eu
-          mkdir -p "${HOME}/.R"
-          printf '%s\n' "$MAKEVARS" > "${HOME}/.R/Makevars.cran"
-          echo "--- ${HOME}/.R/Makevars.cran ---"
-          cat "${HOME}/.R/Makevars.cran"
-          # Through GITHUB_ENV, not a workflow expression on the check step:
-          # HOME is a runner environment variable and is not in the `env`
-          # context, so `env.HOME` there would expand to nothing and the
-          # override would be silently skipped.
-          echo "R_MAKEVARS_USER=${HOME}/.R/Makevars.cran" >> "$GITHUB_ENV"
+          target="${R_MAKEVARS_USER:-${HOME}/.R/Makevars}"
+          mkdir -p "$(dirname "$target")"
+          printf '%s\n' "$MAKEVARS" >> "$target"
+          echo "--- appended to ${target} ---"
+          cat "$target"
+
+      # The probe above reports what the image ships; this one reports what
+      # the check will actually use. Both are worth having: the gap between
+      # them is the override, and an override that silently did nothing is
+      # the failure mode this whole step exists to avoid.
+      - name: Record the toolchain, after the override
+        run: |
+          set -eu
+          for v in CC CXX CFLAGS CXXFLAGS; do
+            printf '%s = %s\n' "$v" "$(R CMD config $v)"
+          done
+          printf 'int main(void){return 0;}\n' > /tmp/probe2.c
+          $(R CMD config CC) $(R CMD config CFLAGS) -dM -E /tmp/probe2.c \
+            | grep -E '__STDC_VERSION__|__clang_major__|^#define __GNUC__' || true
 
       # error_on = "warning" is the contract, and it is what check-r-package
       # does on the other job by default. A compiler diagnostic in a package's
