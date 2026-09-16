@@ -261,7 +261,7 @@ jobs:
           printf '%s\n' "$MAKEVARS" > "${HOME}/.R/Makevars.cran"
           echo "--- ${HOME}/.R/Makevars.cran ---"
           cat "${HOME}/.R/Makevars.cran"
-          # Through GITHUB_ENV, not a ${{ }} expression on the check step:
+          # Through GITHUB_ENV, not a workflow expression on the check step:
           # HOME is a runner environment variable and is not in the `env`
           # context, so `env.HOME` there would expand to nothing and the
           # override would be silently skipped.
