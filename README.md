@@ -37,7 +37,7 @@ Two jobs, covering the two halves of CRAN's
 | Job | Legs | CRAN flavors |
 |---|---|---|
 | `runners` | macOS, Windows, Ubuntu release + oldrel-1 | the macOS, Windows and release/oldrel Linux flavors |
-| `containers` | `ubuntu-clang`, `ubuntu-gcc16` | `r-devel-linux-x86_64-debian-clang`, `r-devel-linux-x86_64-debian-gcc` |
+| `containers` | `clang23`, `ubuntu-clang`, `ubuntu-gcc16` | `r-devel-linux-x86_64-debian-clang`, `r-devel-linux-x86_64-debian-gcc` |
 
 The `containers` job is the part an ordinary matrix cannot do. Those two
 flavors differ from any GitHub runner in the **compiler**: clang 23 building C
@@ -60,17 +60,25 @@ insurance against a stale container image.
 **The containers are overridden to compile the way CRAN does**, because out
 of the box they do not. Measured on the images themselves:
 
-| | `CC` | `CFLAGS` | `__STDC_VERSION__` |
+| | `CC` | `CFLAGS` | C++ stdlib |
 |---|---|---|---|
-| CRAN debian-clang | `clang-23 -std=gnu23` | `-g -O3 -Wall -pedantic` | 202311L |
-| `ubuntu-clang` | `clang-22` | `-g -O2` | **201710L** |
-| `ubuntu-gcc16` | `gcc-16 -std=gnu2x` | `-g -O2` | 202311L |
+| CRAN debian-clang | `clang-23 -std=gnu23` | `-g -O3 -Wall -pedantic` | libstdc++ |
+| `clang23` | `clang-23` | `-O3 -Wall -pedantic` | **libc++** |
+| `ubuntu-clang` | **`clang-22`** | **`-g -O2`** | libstdc++ |
+| `ubuntu-gcc16` | `gcc-16 -std=gnu2x` | `-g -O2` | — |
 
-`ubuntu-clang` ships with no `-std=` at all, so it compiles at C17 — and
-neither image passes `-pedantic`, which is what enables several of the
-diagnostics only CRAN reports. Unoverridden, that job gave a package a clean
-bill of health on sources CRAN had already rejected with four
-`-Wkeyword-macro` warnings.
+No single image is CRAN's debian-clang. `clang23` has the right compiler
+major and CRAN's exact C flags but builds C++ against libc++; `ubuntu-clang`
+has the right C++ standard library and is the image r-hub badges as that
+flavor, but is pinned to clang 22 and ships no `-pedantic`. The default runs
+both, because they fail differently.
+
+`-pedantic` matters more than it looks: it, not `-Wall`, is what enables
+several of the diagnostics only CRAN reports. Unoverridden, `ubuntu-clang`
+gave a package a clean bill of health on sources CRAN had already rejected
+with four `-Wkeyword-macro` warnings. And clang 23 itself still defaults to
+`__STDC_VERSION__ 201710L` — CRAN's `-std=gnu23` is an explicit choice, so
+forcing it is necessary rather than redundant.
 
 `container-makevars` closes it, appending to a user Makevars that R reads
 after its own `Makeconf`:
@@ -84,6 +92,14 @@ CFLAGS += -pedantic
 flags — that survives the image bumping clang versions. Set it to `""` to
 take the images exactly as they ship.
 
+The lines are **appended to whatever user Makevars the image already uses**,
+never written somewhere new and pointed at with `R_MAKEVARS_USER`. That
+variable *replaces* the user Makevars rather than adding to it, and `clang23`
+configures its entire toolchain there — `COPY Makevars /root/.R` plus
+`ENV R_MAKEVARS_USER=/root/.R/Makevars`, with no `Makeconf` patching at all.
+Repointing it threw that away and fell back to `Makeconf`'s gcc, so a
+container named `clang23` checked with GCC and passed.
+
 Every container run logs the image's `CC`, `CXX`, flags and resulting
 `__STDC_VERSION__` before checking, so "is this image really the flavor I
 think it is?" is answerable from the log rather than from a debugging round
@@ -93,7 +109,7 @@ Optional inputs:
 
 ```yaml
     with:
-      containers: '["ubuntu-clang", "ubuntu-gcc16"]'   # default; '[]' skips the job
+      containers: '["clang23", "ubuntu-clang", "ubuntu-gcc16"]'  # default; '[]' skips
       container-makevars: |                            # default; "" takes images as-is
         CC += -std=gnu23
         CFLAGS += -pedantic
