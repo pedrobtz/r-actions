@@ -226,6 +226,26 @@ Optional inputs:
         tools/vendor/checksums.sha256
 ```
 
+**When the vendored files are not a directory of their own**, use `paths`
+instead. It takes one entry per line, overriding `vendor-dir`: an entry with
+no glob character is a directory prefix, anything else is matched as a shell
+glob against each changed path.
+
+```yaml
+    with:
+      paths: |
+        src/cyaml*.c
+        src/cyaml*.h
+```
+
+This is not a corner case. A package that bundles a C library and compiles it
+with its own sources has both in `src/`, deliberately — `R CMD SHLIB` builds
+one flat directory, and moving the bundled code into a subdirectory costs an
+`OBJECTS` list and a GNU-make dependency. A directory prefix cannot say "the
+bundled files and not mine", so the guard would either watch nothing or fire
+on every commit, and a guard that fires on everything is one people learn to
+ignore.
+
 ### `valgrind.yml` — Valgrind
 
 Runs `R CMD check --use-valgrind` under R-release, then **scans the check

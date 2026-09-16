@@ -5,9 +5,34 @@ on:
         description: >
           Path to the vendored third-party sources, relative to the
           repository root. Changes under here are what the guard watches.
+
+          Use `paths` instead when the vendored files are not a directory of
+          their own.
         type: string
         required: false
         default: src/vendor
+      paths:
+        description: >
+          What counts as vendored, one entry per line, overriding
+          `vendor-dir` when set. An entry with no glob character is a
+          directory prefix; anything else is matched as a shell glob against
+          each changed path.
+
+          This exists because vendored code is not always a directory. A
+          package that bundles a C library and compiles it with its own
+          sources has both in `src/`, on purpose -- R CMD SHLIB builds one
+          flat directory, and a subdirectory costs an OBJECTS list and a
+          GNU-make dependency. A directory prefix cannot say "the bundled
+          files and not mine", so the guard either watches nothing or fires
+          on every commit, and a guard that fires on everything is one people
+          learn to ignore.
+
+              paths: |
+                src/cyaml*.c
+                src/cyaml*.h
+        type: string
+        required: false
+        default: ""
       verify:
         description: >
           Script that checks the vendored tree against its manifest, run
@@ -64,17 +89,46 @@ jobs:
           base="origin/${{ github.base_ref }}"
           git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
           changed=$(git diff --name-only "$base"...HEAD)
+          printf '%s\n' "$changed" > /tmp/vendor-changed-all
 
-          dir='${{ inputs.vendor-dir }}'
-          dir=${dir%/}
-          touched=$(printf '%s\n' "$changed" | grep "^$dir/" || true)
-          if [ -z "$touched" ]; then
-            echo "ok  no $dir/ changes in this PR"
+          # `paths` wins when set; otherwise the directory, as a prefix.
+          if [ -n '${{ inputs.paths }}' ]; then
+            printf '%s\n' '${{ inputs.paths }}' > /tmp/vendor-patterns
+            what='the vendored paths'
+          else
+            dir='${{ inputs.vendor-dir }}'
+            printf '%s\n' "${dir%/}" > /tmp/vendor-patterns
+            what="$(printf '%s/' "${dir%/}")"
+          fi
+
+          # An entry with no glob character is a directory prefix; anything
+          # else is a glob. `case` does the matching, so the pattern must stay
+          # unquoted on the right -- quoting it would compare literals and the
+          # guard would silently match nothing.
+          : > /tmp/vendor-touched
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            while IFS= read -r pat; do
+              [ -n "$pat" ] || continue
+              hit=""
+              case "$pat" in
+                *[*?[]*) case "$file" in $pat) hit=1 ;; esac ;;
+                *)       case "$file" in "${pat%/}"/*) hit=1 ;; esac ;;
+              esac
+              if [ -n "$hit" ]; then
+                printf '%s\n' "$file" >> /tmp/vendor-touched
+                break
+              fi
+            done < /tmp/vendor-patterns
+          done < /tmp/vendor-changed-all
+
+          if [ ! -s /tmp/vendor-touched ]; then
+            echo "ok  no changes to $what in this PR"
             exit 0
           fi
 
-          echo "This PR changes $dir/:"
-          printf '%s\n' "$touched" | sed 's/^/  /'
+          echo "This PR changes $what:"
+          sed 's/^/  /' /tmp/vendor-touched
 
           # Read from a file, not a pipe: a `while` on the right of a pipe
           # runs in a subshell, so a failure recorded inside it is lost
@@ -87,7 +141,7 @@ jobs:
             [ -n "$want" ] || continue
             if ! grep -qx "$want" /tmp/vendor-changed; then
               echo
-              echo "FAIL $dir/ changed without updating $want."
+              echo "FAIL vendored sources changed without updating $want."
               missing=1
             fi
           done < /tmp/vendor-required
