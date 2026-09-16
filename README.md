@@ -1,8 +1,10 @@
 # r-actions
 
-Reusable GitHub Actions workflows for R packages, covering test coverage,
-memory safety, undefined behaviour, and static analysis checks that complement
-the standard `R CMD check` run by [r-lib/actions](https://github.com/r-lib/actions).
+Reusable GitHub Actions workflows for R packages. `r-cmd-check.yml` is the
+standard `R CMD check`, run across the GitHub runners *and* the CRAN-like
+containers that an ordinary [r-lib/actions](https://github.com/r-lib/actions)
+matrix cannot reach. The rest cover test coverage, memory safety, undefined
+behaviour, and static analysis.
 
 ## Versioning
 
@@ -16,6 +18,71 @@ See [Releases](https://github.com/pedrobtz/r-actions/releases) for the full
 changelog.
 
 ## Workflows
+
+### `r-cmd-check.yml` — R CMD check, runners and CRAN-like containers
+
+The standard check, in one workflow, across both the GitHub-hosted runners and
+the R-hub containers built to match CRAN's r-devel Linux flavors. Fails on a
+WARNING on every leg.
+
+```yaml
+jobs:
+  R-CMD-check:
+    uses: pedrobtz/r-actions/.github/workflows/r-cmd-check.yml@v1
+```
+
+Two jobs, covering the two halves of CRAN's
+[flavor list](https://cran.r-project.org/web/checks/check_flavors.html):
+
+| Job | Legs | CRAN flavors |
+|---|---|---|
+| `runners` | macOS, Windows, Ubuntu release + oldrel-1 | the macOS, Windows and release/oldrel Linux flavors |
+| `containers` | `ubuntu-clang`, `ubuntu-gcc16` | `r-devel-linux-x86_64-debian-clang`, `r-devel-linux-x86_64-debian-gcc` |
+
+The `containers` job is the part an ordinary matrix cannot do. Those two
+flavors differ from any GitHub runner in the **compiler**: clang 23 building C
+as `-std=gnu23`, and GCC 16. `ubuntu-latest` carries neither — its clang still
+defaults to C17 and its GCC is several majors behind — so a diagnostic that
+exists only in the newer compiler, or only in the newer language standard,
+stays invisible until CRAN's incoming pretest reports it. That is a rejected
+submission rather than a red check.
+
+It matters most for a package that compiles bundled third-party C. Upstream
+code is written against the compilers upstream tests on, and the gap arrives
+as someone else's warnings in your check log.
+
+**The default `runners` matrix has no R-devel Linux row**, unlike the standard
+r-lib/actions template. The `containers` job is R-devel on Linux already, on
+the compilers CRAN actually uses; a row pinning R-devel to the runner's own
+GCC matches no CRAN flavor. Add it back if you want a plain R-devel leg as
+insurance against a stale container image.
+
+Every container run logs the image's `CC`, `CXX`, flags and resulting
+`__STDC_VERSION__` before checking, so "is this image really the flavor I
+think it is?" is answerable from the log rather than from a debugging round
+trip.
+
+Optional inputs:
+
+```yaml
+    with:
+      containers: '["ubuntu-clang", "ubuntu-gcc16"]'   # default; '[]' skips the job
+      runners: |                                       # default
+        [{"os": "macos-latest", "r": "release"},
+         {"os": "windows-latest", "r": "release"},
+         {"os": "ubuntu-latest", "r": "release"},
+         {"os": "ubuntu-latest", "r": "oldrel-1"}]
+      args: 'c("--no-manual", "--as-cran")'            # default
+      build-args: 'c("--no-manual")'                   # default, runners only
+      timeout-minutes: 45                              # default
+      env: |                                           # extra env for the check steps
+        MYPKG_SLOW_TESTS=true
+```
+
+`containers` takes any name from <https://r-hub.github.io/containers/>.
+`ubuntu-next` and `ubuntu-release` are CRAN-like too, but sit closer to what
+the `runners` job already does. `build-args` reaches the `runners` job only:
+the container images carry no LaTeX and no vignette-compaction tooling.
 
 ### `coverage.yml` — Test coverage
 
@@ -273,6 +340,29 @@ jobs:
 ```
 
 ## Usage
+
+### R CMD check
+
+Copy [`examples/r-cmd-check.yml`](examples/r-cmd-check.yml) into your package
+as `.github/workflows/R-CMD-check.yml`, replacing the r-lib/actions template:
+
+```yaml
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+name: R-CMD-check
+
+permissions: read-all
+
+jobs:
+  R-CMD-check:
+    uses: pedrobtz/r-actions/.github/workflows/r-cmd-check.yml@v1
+```
+
+Keep the file name your badge already points at — the workflow's own `name:`
+is what the UI shows, and the caller's file name is what the badge URL uses.
 
 ### Coverage
 
