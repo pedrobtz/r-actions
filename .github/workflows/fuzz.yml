@@ -1,0 +1,306 @@
+# Coverage-guided fuzzing of the package's C, with no R in the loop.
+#
+# Random fuzzing and coverage-guided fuzzing are not the same tool. A
+# generator that emits random bytes, syntax fragments and truncations finds
+# shallow crashes and then nothing else: it has no idea whether an input
+# reached new code, so it re-explores the same entry branches forever.
+# libFuzzer instruments the binary, keeps a corpus, and mutates toward
+# uncovered edges.
+#
+# The practical difference for a parser is several orders of magnitude. A
+# native harness runs at millions of executions per second against the tens of
+# thousands an R-level loop manages in a CI job, and it compounds across runs
+# because the corpus persists.
+#
+# The harness is package-specific, so this workflow's job is to build and run
+# one the caller supplies, not to invent it. That is also why the sources are
+# an input: a package's src/ mixes the library being fuzzed with the files
+# that talk to R's C API, and the latter do not compile without R and have no
+# business in a fuzz target anyway.
+on:
+  workflow_call:
+    inputs:
+      harness:
+        description: >
+          Path to the harness source: a C or C++ file defining
+          `LLVMFuzzerTestOneInput`, which is the entry point libFuzzer calls
+          with each input.
+
+              int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
+
+          The job checks the built binary actually exports it, rather than
+          trusting that the file was compiled in.
+        type: string
+        required: true
+      sources:
+        description: >
+          The sources to fuzz, as a shell glob expanded from the repository
+          root. These are compiled directly, without R.
+
+          The default is almost certainly wrong for a package that also has
+          R-facing C in src/ -- init.c, anything calling Rf_* -- because those
+          need R's headers and are not what a fuzz target should contain. Name
+          the library's own files, or use `exclude-sources`.
+        type: string
+        required: false
+        default: src/*.c
+      exclude-sources:
+        description: >
+          Paths to drop from `sources`, one per line, matched as a shell glob.
+          The R-facing half of src/ is what this is for.
+
+              exclude-sources: |
+                src/init.c
+                src/zuyaml_*.c
+        type: string
+        required: false
+        default: ""
+      cflags:
+        description: >
+          Compile flags for the fuzz target.
+
+          -O1 is the usual choice: fuzzing throughput matters, and the
+          sanitizers still see what they need to. Be aware that optimisation
+          can delete an allocation whose result is never really used, taking
+          a double-free or leak in that code with it -- measured, on a toy
+          whose buffer was written and never read. Real parser code is rarely
+          dead in that way, but -O0 is the answer if a known bug stops
+          reproducing under the fuzzer.
+        type: string
+        required: false
+        default: -g -O1 -fno-omit-frame-pointer
+      sanitizers:
+        description: >
+          The -fsanitize= list. `fuzzer` is the engine and must stay.
+
+          address and undefined are both here because this is the one place
+          in this repository where ASan works without argument: the C links
+          into an actual executable rather than being dlopen'd into an
+          uninstrumented R, which is the whole difficulty sanitizers.yml
+          documents at length.
+        type: string
+        required: false
+        default: fuzzer,address,undefined
+      seed-corpus:
+        description: >
+          Directory of starting inputs, copied into the working corpus.
+
+          Seeds are the difference between a fuzzer that spends its budget
+          rediscovering the file format and one that starts inside it. A
+          conformance suite the package already fetches for its tests is
+          usually the best corpus available.
+        type: string
+        required: false
+        default: ""
+      dictionary:
+        description: >
+          libFuzzer dictionary file: the tokens of the format, one quoted
+          string per line. For YAML that is the indicator set, for JSON the
+          punctuation. Mutation guided by a dictionary reaches valid-looking
+          structure far sooner than one working a byte at a time.
+        type: string
+        required: false
+        default: ""
+      max-total-time:
+        description: >
+          Seconds to fuzz. The default is a PR-sized budget; a scheduled run
+          is where a long one belongs, and the corpus cache is what makes the
+          short runs add up to something.
+        type: number
+        required: false
+        default: 120
+      libfuzzer-args:
+        description: >
+          Extra arguments passed to the fuzz target, e.g. `-max_len=65536`
+          or `-rss_limit_mb=4096`.
+        type: string
+        required: false
+        default: ""
+      cache-corpus:
+        description: >
+          Carry the corpus between runs through the actions cache. This is
+          what makes coverage accumulate instead of restarting from the seeds
+          every time.
+        type: boolean
+        required: false
+        default: true
+      timeout-minutes:
+        type: number
+        required: false
+        default: 30
+
+name: fuzz
+
+permissions: read-all
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Collect the sources
+        id: sources
+        env:
+          SOURCES: ${{ inputs.sources }}
+          EXCLUDES: ${{ inputs.exclude-sources }}
+          HARNESS: ${{ inputs.harness }}
+        run: |
+          set -eu
+          if [ ! -f "$HARNESS" ]; then
+            echo "::error::harness: no such file: ${HARNESS}"
+            exit 1
+          fi
+
+          # Unquoted on purpose: this is a glob the caller wrote, and it has
+          # to expand here.
+          set -- $SOURCES
+          : > sources.txt
+          for f in "$@"; do
+            [ -f "$f" ] || continue
+            skip=""
+            if [ -n "$EXCLUDES" ]; then
+              while IFS= read -r pat; do
+                [ -n "$pat" ] || continue
+                case "$f" in $pat) skip=1 ;; esac
+                if [ -n "$skip" ]; then break; fi
+              done <<EOF
+          $EXCLUDES
+          EOF
+            fi
+            if [ -n "$skip" ]; then
+              echo "excluded  $f"
+            else
+              printf '%s\n' "$f" >> sources.txt
+            fi
+          done
+
+          if [ ! -s sources.txt ]; then
+            echo "::error::no sources matched '${SOURCES}' after exclusions"
+            exit 1
+          fi
+          echo "--- fuzzing these ---"
+          cat sources.txt
+
+      - name: Build the fuzz target
+        env:
+          HARNESS: ${{ inputs.harness }}
+          CFLAGS_IN: ${{ inputs.cflags }}
+          SANITIZERS: ${{ inputs.sanitizers }}
+        run: |
+          set -eu
+          # shellcheck disable=SC2046
+          clang $CFLAGS_IN "-fsanitize=${SANITIZERS}" \
+            "$HARNESS" $(cat sources.txt) -o fuzz-target
+
+          # Verify rather than assume, as every other instrumented job here
+          # does. A target built without the harness compiled in, or without
+          # the engine linked, runs and exits cleanly and looks like a fuzzing
+          # campaign that found nothing.
+          if ! nm fuzz-target | grep -q 'LLVMFuzzerTestOneInput'; then
+            echo "::error::built binary does not define LLVMFuzzerTestOneInput" >&2
+            exit 1
+          fi
+          if ! nm -D fuzz-target 2>/dev/null | grep -q '__sanitizer\|__asan' \
+             && ! nm fuzz-target | grep -q '__sanitizer\|__asan'; then
+            echo "::warning::no sanitizer symbols found in the fuzz target"
+          fi
+          echo "ok  fuzz target built"
+
+      - name: Restore the corpus
+        if: inputs.cache-corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ github.repository }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ github.repository }}-
+
+      - name: Seed the corpus
+        env:
+          SEEDS: ${{ inputs.seed-corpus }}
+        run: |
+          set -eu
+          mkdir -p corpus
+          if [ -n "$SEEDS" ]; then
+            if [ ! -d "$SEEDS" ]; then
+              echo "::error::seed-corpus: no such directory: ${SEEDS}"
+              exit 1
+            fi
+            # Flattened, because libFuzzer takes a directory of files and not
+            # a tree, and a conformance suite is usually a tree.
+            find "$SEEDS" -type f -exec cp {} corpus/ \; 2>/dev/null || true
+          fi
+          echo "corpus holds $(find corpus -type f | wc -l | tr -d ' ') input(s)"
+
+      # libFuzzer exits non-zero on a finding and writes the input that
+      # caused it to crash-<sha1> in the working directory. Both halves
+      # matter: the exit status fails the job, and the file is what makes the
+      # finding reproducible afterwards, so it is uploaded either way.
+      - name: Fuzz
+        id: run
+        env:
+          DICT: ${{ inputs.dictionary }}
+          MAX_TIME: ${{ inputs.max-total-time }}
+          EXTRA: ${{ inputs.libfuzzer-args }}
+        run: |
+          set -eu
+          args="-max_total_time=${MAX_TIME} -print_final_stats=1"
+          if [ -n "$DICT" ]; then
+            if [ ! -f "$DICT" ]; then
+              echo "::error::dictionary: no such file: ${DICT}"
+              exit 1
+            fi
+            args="${args} -dict=${DICT}"
+          fi
+
+          # The fuzzer's status comes from PIPESTATUS, and nothing may run
+          # between the pipeline and reading it.
+          #
+          # A pipeline's own status is its *last* command's, which here is
+          # tee, and tee succeeds whatever the fuzzer did. So the obvious
+          # `| tee fuzz.log || status=$?` never fires: the job would go green
+          # on a crashing input, which is the one thing this workflow exists
+          # to notice. PIPESTATUS carries the real status, and it is rewritten
+          # by the next command that runs -- measured: an intervening `echo`
+          # or a `x=$(...)` leaves PIPESTATUS[0] at 0 -- so it is read on the
+          # line straight after, before anything else.
+          set +e
+          # shellcheck disable=SC2086
+          ./fuzz-target corpus $args $EXTRA 2>&1 | tee fuzz.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the fuzzer found a crashing input; see the fuzz-findings artifact"
+            ls -la crash-* leak-* timeout-* oom-* 2>/dev/null || true
+            exit 1
+          fi
+          echo "no crashes in ${MAX_TIME}s."
+
+      - name: Save the corpus
+        if: always() && inputs.cache-corpus
+        uses: actions/cache/save@v4
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ github.repository }}-${{ github.run_id }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-findings
+          path: |
+            fuzz.log
+            crash-*
+            leak-*
+            timeout-*
+            oom-*
+          if-no-files-found: ignore

@@ -610,6 +610,59 @@ file only ever grows: entries accumulate, nobody removes them, and eventually
 one suppresses a real finding it happens to match. Making a disappeared entry
 fail means fixing the code forces you to delete its line, so the file shrinks
 over time instead.
+### `fuzz.yml` — coverage-guided fuzzing
+
+Random fuzzing and coverage-guided fuzzing are not the same tool. A loop that
+generates random bytes and truncations finds shallow crashes and then nothing
+else: it has no idea whether an input reached new code, so it re-explores the
+same entry branches forever. libFuzzer instruments the binary, keeps a corpus,
+and mutates toward uncovered edges — for a parser that is several orders of
+magnitude of difference, and it compounds across runs because the corpus
+persists.
+
+The harness is package-specific, so this workflow builds and runs one you
+supply. It compiles your C **directly, without R**, which is the whole source
+of the speed — and also the one place in this repository where ASan works
+without argument, since the code links into a real executable rather than
+being `dlopen`'d into an uninstrumented R.
+
+```yaml
+jobs:
+  fuzz:
+    uses: pedrobtz/r-actions/.github/workflows/fuzz.yml@v1
+    with:
+      harness: tools/fuzz/harness.c
+      exclude-sources: |
+        src/init.c
+        src/zuyaml_*.c
+      seed-corpus: tests/yaml-test-suite
+      dictionary: tools/fuzz/yaml.dict
+      max-total-time: 120
+```
+
+The harness is the usual libFuzzer entry point:
+
+```c
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
+```
+
+**`exclude-sources` is the input you will actually need.** A package's `src/`
+mixes the library being fuzzed with the files that talk to R's C API, and
+those neither compile without R's headers nor belong in a fuzz target. The job
+verifies the built binary really exports `LLVMFuzzerTestOneInput`, for the
+same reason the sanitizer jobs verify their instrumentation: a target built
+without the harness runs, exits cleanly, and looks exactly like a campaign
+that found nothing.
+
+Seeds and a dictionary are what separate a fuzzer that spends its budget
+rediscovering the file format from one that starts inside it — a conformance
+suite the package already fetches for its tests is usually the best corpus
+available. The corpus is cached between runs, so short PR runs and a long
+scheduled one accumulate into one campaign.
+
+A finding fails the job, and the input that caused it is uploaded as an
+artifact so it can be replayed.
+
 ### `analyzers.yml` — static analysis, starting with `-fanalyzer`
 
 The other two static checks here are narrow on purpose: `rchk.yml` reasons

@@ -1,0 +1,21 @@
+on:
+  pull_request:
+  schedule:
+    # A long run nightly. The corpus cache is what makes the short PR runs
+    # and this one add up to a single campaign.
+    - cron: "0 3 * * *"
+
+name: fuzz
+
+jobs:
+  fuzz:
+    uses: pedrobtz/r-actions/.github/workflows/fuzz.yml@v1
+    with:
+      harness: tools/fuzz/harness.c
+      sources: src/*.c
+      exclude-sources: |
+        src/init.c
+        src/zuyaml_*.c
+      seed-corpus: tests/yaml-test-suite
+      dictionary: tools/fuzz/yaml.dict
+      max-total-time: ${{ github.event_name == 'schedule' && 1800 || 120 }}
