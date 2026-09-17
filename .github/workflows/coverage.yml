@@ -1,5 +1,48 @@
 on:
   workflow_call:
+    inputs:
+      native:
+        description: >
+          Also run the `native` job: line and branch coverage of the C in
+          src/, through gcov, reported separately from the covr number.
+
+          covr measures R code. For a package that is mostly a C parser
+          behind a thin R wrapper, that number can look excellent while large
+          parts of the C are never executed by any test -- and a .covrignore
+          excluding the vendored sources, which is the right call for a
+          badge, leaves the question unanswered rather than answering it.
+
+          Off by default: it needs compiled code, and it is a second full
+          build and test run.
+        type: boolean
+        required: false
+        default: false
+      native-run:
+        description: >
+          Shell command that exercises the package for the `native` job,
+          instead of running each file in tests/ with Rscript.
+
+          The default runs the test suite the way R CMD check does, which is
+          usually what you want. Reach for this when coverage should reflect
+          something else -- a conformance corpus, a replay driver -- or when
+          the suite needs a harness of its own. R_LIBS already points at the
+          instrumented install.
+        type: string
+        required: false
+        default: ""
+      native-exclude:
+        description: >
+          Paths to leave out of the native coverage report, one per line,
+          matched as in vendor.yml: an entry with no glob character is a
+          directory prefix, anything else is a glob.
+
+          Empty by default, and that default is deliberate. The interesting
+          question about a vendored parser is precisely how much of the part
+          you actually call is reached, and excluding it by reflex is how
+          that question stays unanswered.
+        type: string
+        required: false
+        default: ""
 
 name: coverage
 
@@ -191,3 +234,202 @@ jobs:
             git commit -m "Update coverage badge (${PCT}%)"
             git push
           fi
+
+  # Line and branch coverage of the C, which is a different question from
+  # the one covr answers.
+  #
+  # Branch coverage is the number that matters here, and it is the one covr
+  # does not report. A parser's error handling is overwhelmingly
+  # `if (err) goto fail;`: the line executes on the happy path, the branch
+  # does not. "The emitter's error paths are tested" and "the emitter's error
+  # paths have never once executed" look identical in a line-coverage number
+  # and are the whole difference in a branch one.
+  #
+  # Reported, never gated, and deliberately not a badge. A low figure on a
+  # vendored file may be entirely correct -- a bundled library carries
+  # modules the package never calls and cannot drop from the tarball. This
+  # number wants reading, not defending.
+  native:
+    if: inputs.native
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Nothing to measure without C
+        id: probe
+        run: |
+          set -eu
+          if [ -d src ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No src/ directory: nothing to measure."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: r-lib/actions/setup-r@v2
+        if: steps.probe.outputs.skip == 'false'
+        with:
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        if: steps.probe.outputs.skip == 'false'
+        with:
+          dependencies: '"all"'
+
+      # --coverage is -fprofile-arcs -ftest-coverage plus the link-side
+      # -lgcov. -O0 because optimisation rearranges and merges branches until
+      # the counts no longer correspond to anything in the source, which is
+      # the one property this job needs them to have.
+      #
+      # `+=` so R's own flags survive, as everywhere else here.
+      - name: Build instrumented
+        if: steps.probe.outputs.skip == 'false'
+        run: |
+          set -eu
+          target="${R_MAKEVARS_USER:-${HOME}/.R/Makevars}"
+          mkdir -p "$(dirname "$target")"
+          {
+            echo "CFLAGS += -O0 -g --coverage"
+            echo "CXXFLAGS += -O0 -g --coverage"
+            echo "LDFLAGS += --coverage"
+          } >> "$target"
+          cat "$target"
+
+          # Installed from the source directory on purpose, not from a
+          # tarball: gcc writes the .gcno notes next to the object files, and
+          # the .gcda counts land beside them at run time. Build somewhere
+          # temporary and the two halves end up in a directory that is gone
+          # before gcov could be pointed at it.
+          mkdir -p "${GITHUB_WORKSPACE}/lib"
+          R CMD INSTALL --preclean --library="${GITHUB_WORKSPACE}/lib" .
+          echo "--- notes written ---"
+          find src -name '*.gcno' | head -20
+
+      # Each file in tests/, which is what R CMD check runs. Kept out of
+      # R CMD check itself deliberately: check copies the package elsewhere
+      # to test it, and the .gcda counters would accumulate against that copy
+      # rather than against the tree gcov is about to read.
+      - name: Exercise the package
+        if: steps.probe.outputs.skip == 'false'
+        env:
+          R_LIBS: ${{ github.workspace }}/lib
+          RUN_COMMAND: ${{ inputs.native-run }}
+        run: |
+          set -eu
+          if [ -n "$RUN_COMMAND" ]; then
+            sh -c "$RUN_COMMAND"
+          elif [ -d tests ]; then
+            for f in tests/*.R; do
+              [ -e "$f" ] || continue
+              echo "----- $f"
+              Rscript "$f"
+            done
+          else
+            echo "::warning::no tests/ directory and no native-run; coverage will be empty"
+          fi
+          echo "--- counts written ---"
+          find src -name '*.gcda' | head -20
+
+      - name: Report coverage of src/
+        if: steps.probe.outputs.skip == 'false'
+        env:
+          EXCLUDE: ${{ inputs.native-exclude }}
+        run: |
+          set -eu
+          cd src
+
+          if ! ls *.gcda >/dev/null 2>&1; then
+            echo "::warning::no .gcda files: the instrumented build ran nothing"
+            echo "## Native coverage" >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo "No coverage data was produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # -b for branch counts, which is the point; -c to count branches
+          # taken rather than report them as percentages of a percentage.
+          gcov -b -c *.gcno > gcov.log 2>&1 || true
+
+          : > /tmp/patterns
+          if [ -n "$EXCLUDE" ]; then printf '%s\n' "$EXCLUDE" > /tmp/patterns; fi
+
+          # gcov's report is a stanza per file:
+          #   File 'cyaml.c'
+          #   Lines executed:85.71% of 42
+          #   Branches executed:90.00% of 20
+          #   Taken at least once:75.00% of 20
+          #
+          # "Taken at least once" is the honest branch number. "Branches
+          # executed" counts a branch as covered when the instruction ran at
+          # all, so an `if (err)` that was reached only on the happy path
+          # counts there and not here.
+          awk -F"'" '/^File /{file=$2; next}
+               /^Lines executed:/{split($0,a,":"); split(a[2],b,"% of "); lp[file]=b[1]; ln[file]=b[2]; next}
+               /^Taken at least once:/{split($0,a,":"); split(a[2],b,"% of "); tp[file]=b[1]; tn[file]=b[2]; next}
+               END{for (f in lp) printf "%s\t%s\t%s\t%s\t%s\n", f, lp[f], ln[f], (f in tp ? tp[f] : "-"), (f in tn ? tn[f] : "-")}' \
+            gcov.log | sort > ../native-coverage.tsv
+
+          {
+            echo "## Native coverage (gcov)"
+            echo
+            echo "| File | Lines | Line cov | Branches | Taken at least once |"
+            echo "|:-----|------:|---------:|---------:|--------------------:|"
+          } > ../summary.md
+
+          shown=0
+          while IFS="$(printf '\t')" read -r file lpct lnum tpct tnum; do
+            # gcov names headers and system files too; only the package's own
+            # sources are the subject here.
+            [ -e "$file" ] || continue
+            path="src/${file}"
+            hit=""
+            while IFS= read -r pat; do
+              [ -n "$pat" ] || continue
+              case "$pat" in
+                *[*?[]*) case "$path" in $pat) hit=1 ;; esac ;;
+                *)       case "$path" in "${pat%/}"/*) hit=1 ;; esac ;;
+              esac
+              if [ -n "$hit" ]; then break; fi
+            done < /tmp/patterns
+            if [ -n "$hit" ]; then continue; fi
+            shown=$((shown + 1))
+            # gcov says "No branches" instead of "Taken at least once" for a
+            # file that has none, so there is nothing to put a percentage on.
+            if [ "$tpct" = "-" ]; then
+              echo "| \`${path}\` | ${lnum} | ${lpct}% | — | — |" >> ../summary.md
+            else
+              echo "| \`${path}\` | ${lnum} | ${lpct}% | ${tnum} | ${tpct}% |" >> ../summary.md
+            fi
+          done < ../native-coverage.tsv
+
+          if [ "$shown" -eq 0 ]; then
+            echo "| _(no files)_ | | | | |" >> ../summary.md
+          fi
+
+          {
+            echo
+            echo "Branch coverage is the column to read. A parser's error"
+            echo "handling is mostly \`if (err) goto fail;\` -- the line runs on"
+            echo "the happy path, the branch does not."
+          } >> ../summary.md
+
+          cat ../summary.md >> "$GITHUB_STEP_SUMMARY"
+          cat ../summary.md
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.probe.outputs.skip == 'false'
+        with:
+          name: native-coverage
+          path: |
+            native-coverage.tsv
+            src/gcov.log
+            src/*.gcov
+          if-no-files-found: ignore

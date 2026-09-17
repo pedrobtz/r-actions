@@ -163,6 +163,52 @@ To display the badge in your README, add the following line (replacing
 ![Coverage]({owner}/{repo}/raw/main/.github/badges/coverage.svg)
 ```
 
+#### `native: true` — coverage of the C, separately
+
+covr measures R code. For a package that is mostly a C parser behind a thin R
+wrapper, that number can look excellent while large parts of the C are never
+executed by any test — and a `.covrignore` excluding the vendored sources,
+which is the right call for a badge, leaves the question unanswered rather
+than answering it.
+
+```yaml
+jobs:
+  coverage:
+    uses: pedrobtz/r-actions/.github/workflows/coverage.yml@v1
+    permissions:
+      contents: write
+    with:
+      native: true
+```
+
+A separate job builds with `--coverage`, runs the suite, and writes a per-file
+gcov table to the job summary:
+
+| File | Lines | Line cov | Branches | Taken at least once |
+|:-----|------:|---------:|---------:|--------------------:|
+| `src/parser.c` | 13 | 100.00% | 12 | 58.33% |
+
+**Read the last column.** That row is real output from a small parser whose
+tests only ever pass it valid input: every line runs, and well under half the
+branches are ever taken. A parser's error handling is overwhelmingly
+`if (err) goto fail;` — the line executes on the happy path, the branch does
+not, and those paths are exactly where the interesting bugs are. gcov's
+"Branches executed" counts a branch as covered when the instruction ran at
+all, so the honest number is "taken at least once".
+
+It is **not a badge and not a gate**, deliberately. A low figure on a vendored
+file may be entirely correct: a bundled library carries modules the package
+never calls and cannot drop from the tarball. This number wants reading, not
+defending.
+
+`native-run` replaces the default (running each file in `tests/` the way
+`R CMD check` does) when coverage should reflect something else — a
+conformance corpus, a replay driver. `native-exclude` drops paths from the
+table, matched as in `vendor.yml`; it is empty by default on purpose, since
+how much of the vendored parser your tests actually reach is the question
+worth asking. Note that `.covrignore` does not apply here — that is covr's,
+and this job does not use covr.
+
 ### `sanitizers.yml` — UndefinedBehaviorSanitizer
 
 Builds and checks the package under R-devel with clang and UBSan, catching
