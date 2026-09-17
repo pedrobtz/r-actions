@@ -189,6 +189,55 @@ jobs:
         MYPKG_SLOW_TESTS=true
 ```
 
+#### Checking beyond CRAN's UBSan subset
+
+The default flags are UBSan as CRAN configures it, which is the point: the
+flavor that can reject a submission is the one worth matching. CRAN's set is a
+subset of what UBSan offers, though, and the omitted checks are aimed at the
+arithmetic a parser does constantly.
+
+`extra-ubsan-checks` appends to the flags, in this job and in the `asan`
+containers. `ubsan-suppressions` is a file of the cases you have looked at and
+accepted.
+
+```yaml
+jobs:
+  sanitizers:
+    uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
+    with:
+      extra-ubsan-checks: -fsanitize=integer
+      ubsan-suppressions: tools/ubsan.supp
+```
+
+| flag | catches |
+|:--|:--|
+| `-fsanitize=integer` | unsigned overflow and truncation |
+| `-fsanitize=implicit-conversion` | narrowing that silently loses data |
+| `-fsanitize=local-bounds` | bounds on local arrays |
+
+`integer` is the one with the best ratio. Unsigned overflow is *defined*
+behaviour, so CRAN has no reason to check it, and it is still a bug when it
+happens to a size, an offset or a depth counter — a package whose safety rests
+on bounded counters is making a claim about exactly this arithmetic.
+
+None of these can be on by default, because they fire on correct and
+deliberate code: hash mixing wants wrapping, and a checked narrowing is still
+a narrowing. Write the deliberate cases down instead, one `<check>:<file or
+function>` per line:
+
+```
+unsigned-integer-overflow:src/hash.c
+implicit-signed-integer-truncation:pack_header
+```
+
+Two things worth knowing before you turn these on. They are **fatal**, like
+the default set, but by a different route — `-fno-sanitize-recover=undefined`
+does not cover these groups, and `halt_on_error=1` stops the process on one
+anyway. So the run ends at the first finding, and adoption means working
+through them a run at a time. And these are clang spellings: GCC has no such
+groups, so `gcc-asan` skips them rather than failing to build, and says so in
+the log.
+
 **Why no ASan here.** ASan instruments a package `.so` fine, but that `.so` is
 `dlopen`'d into an R that is not itself instrumented. Making that work needs
 `-shared-libasan`, an `LD_PRELOAD` of the runtime into R, and
