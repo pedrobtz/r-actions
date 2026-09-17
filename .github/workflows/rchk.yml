@@ -15,6 +15,46 @@ on:
         type: boolean
         required: false
         default: false
+      baseline:
+        description: >
+          Path to a file of accepted findings, relative to the repository
+          root. With one set, the job fails only on findings that are *not*
+          listed -- the same shape, and the same reason, as valgrind.yml's
+          `suppressions`.
+
+          fail-on-findings alone is a boolean, and a boolean has one bad day
+          in it. The first time rchk reports a false positive against a
+          package that has already turned the gate on, the choices are to
+          leave CI red on something that is not a bug, or to set
+          fail-on-findings: false and lose the gate entirely -- including for
+          the real regression next month. The second is what actually
+          happens, because a red check everyone knows is wrong gets routed
+          around within a day.
+
+          Each line is one finding, as three tab-separated fields:
+
+              UP<TAB>cyaml_parse_document<TAB>src/cyaml_parser.c
+
+          `#` comments and blank lines are ignored. When the job finds
+          something unlisted it prints the exact lines to add, so adopting a
+          finding is copy-and-paste rather than transcription.
+
+          Deliberately keyed on tag, function and file, and deliberately not
+          on the line number or the message. Line numbers move with any edit
+          above them, and a baseline that goes stale on unrelated commits is
+          one people stop trusting. The cost of leaving them out is that two
+          findings of the same tag in one function collapse to a single
+          entry; that is the trade, and it is the right way round.
+
+          A baseline entry that stops reproducing is also reported, and fails
+          the job when the gate is on. Without that the file only ever grows:
+          entries accumulate, nobody removes them, and eventually one
+          suppresses a real finding it happens to match. Making a
+          disappeared entry an error means fixing the code forces you to
+          delete its line, so the file shrinks over time instead.
+        type: string
+        required: false
+        default: ""
 
 name: rchk
 
@@ -59,7 +99,30 @@ jobs:
       # Real findings carry rchk's diagnostic tags -- [UP] unprotected, [PB]
       # protect balance, [UPB] both -- and name a line in the package's own
       # source. Those are what this matches.
-      - name: Report
+      # Findings are parsed into a stable key before anything is decided,
+      # because the raw line cannot be compared against anything twice.
+      #
+      # rchk emits two shapes. Its source (linemsg.cpp) prints a function
+      # header and then indented messages carrying the tag:
+      #
+      #   Function cyaml_parse_document
+      #     [UP] unprotected variable v while calling ... /path/src/cyaml.c:412
+      #
+      # and maacheck puts everything on one line, naming the function after
+      # "at" (this is the example in rchk's own README):
+      #
+      #   WARNING Suspicious call (...) to Rf_setAttrib at read_jpeg /rchk/trunk/packages/build/IsnsJjDm/jpeg/src/read.c:131
+      #
+      # Note what that path contains. rchk builds the package in a directory
+      # with a random name -- IsnsJjDm above -- so the absolute path differs
+      # on every single run. A baseline keyed on it would match nothing,
+      # ever, and would look exactly like a package that had fixed all its
+      # findings. Paths are cut back to the package-relative form, src/... ,
+      # which is also how a human would write one down.
+      #
+      # Line numbers are dropped for the reason the input documents: they
+      # move with any edit above them.
+      - name: Parse findings
         if: always()
         run: |
           set -eu
@@ -67,25 +130,183 @@ jobs:
             echo "rchk produced no output." >&2
             exit 1
           fi
-          echo "----- rchk summary -----"
-          findings='\[UP\]|\[PB\]|\[UPB\]|unprotected|negative depth|imbalanced'
-          if grep -E "$findings" rchk-output.txt; then
-            if [ "${{ inputs.fail-on-findings }}" = "true" ]; then
-              echo "::error::rchk reported potential PROTECT issues"
-              exit 1
-            fi
-            echo "::warning::rchk reported potential PROTECT issues; review the rchk-output artifact"
+
+          awk '
+            function normpath(p,   n, a) {
+              # Everything from the last /src/ onwards, else the bare name.
+              if (match(p, /.*\/src\//)) return "src/" substr(p, RLENGTH + 1)
+              n = split(p, a, "/")
+              return a[n]
+            }
+            # "ERROR: too many states" names R functions rchk gave up on, not
+            # findings. Reported separately, never keyed.
+            /^ERROR: too many states/ { next }
+            /^Function [^ ]/          { fn = $2; next }
+            {
+              if ($0 !~ /\[UP\]|\[PB\]|\[UPB\]|unprotected|negative depth|imbalanced/) next
+
+              tag = ""
+              if (match($0, /\[(UP|PB|UPB)\]/)) tag = substr($0, RSTART + 1, RLENGTH - 2)
+              else if ($0 ~ /^WARNING/)         tag = "WARNING"
+
+              loc = $NF
+              where = ""
+              if (loc ~ /:[0-9]+$/) { sub(/:[0-9]+$/, "", loc); where = normpath(loc) }
+
+              who = fn
+              if ($0 ~ /^WARNING/ && NF >= 3 && $(NF-2) == "at") who = $(NF-1)
+
+              # Anything that matched as a finding but could not be keyed is
+              # kept, not dropped. A parser that silently discards what it
+              # does not understand turns a format change upstream into a
+              # green build, which is the one outcome this must never have.
+              if (tag == "" || where == "" || who == "") {
+                print $0 >> "findings.unparsed"
+                next
+              }
+              printf "%s\t%s\t%s\n", tag, who, where >> "findings.keys"
+              printf "%s\t%s\t%s\t%s\n", tag, who, where, $0 >> "findings.detail"
+            }
+          ' rchk-output.txt
+
+          for f in findings.keys findings.detail findings.unparsed; do
+            [ -f "$f" ] || : > "$f"
+          done
+          sort -u findings.keys -o findings.keys
+
+          echo "----- rchk findings -----"
+          if [ -s findings.keys ]; then
+            cat findings.keys
           else
-            echo "rchk found no PROTECT issues."
+            echo "(none)"
           fi
+          if [ -s findings.unparsed ]; then
+            echo "----- matched as findings but could not be keyed -----"
+            cat findings.unparsed
+          fi
+
           # Reported, never failed: this is analysis coverage, not a result.
           if grep -E "too many states" rchk-output.txt; then
             echo "::notice::rchk hit its abstraction limit on the functions above" \
                  "and did not analyse them; these are usually R's own."
           fi
 
+      - name: Compare against the baseline
+        if: always()
+        env:
+          BASELINE: ${{ inputs.baseline }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        run: |
+          set -eu
+
+          if [ -n "$BASELINE" ] && [ ! -f "$BASELINE" ]; then
+            echo "::error::baseline: no such file: ${BASELINE}"
+            exit 1
+          fi
+
+          : > baseline.keys
+          if [ -n "$BASELINE" ]; then
+            sed -e 's/#.*$//' -e 's/[[:space:]]*$//' "$BASELINE" \
+              | grep -v '^[[:space:]]*$' | sort -u > baseline.keys || true
+          fi
+
+          comm -23 findings.keys baseline.keys > findings.new || true
+          comm -13 findings.keys baseline.keys > baseline.stale || true
+
+          new=$(wc -l < findings.new | tr -d ' ')
+          stale=$(wc -l < baseline.stale | tr -d ' ')
+          unparsed=$(wc -l < findings.unparsed | tr -d ' ')
+
+          {
+            echo "## rchk"
+            echo
+            echo "| | count |"
+            echo "|:--|--:|"
+            echo "| findings | $(wc -l < findings.keys | tr -d ' ') |"
+            echo "| accepted by baseline | $(wc -l < baseline.keys | tr -d ' ') |"
+            echo "| **new** | ${new} |"
+            echo "| baseline entries that did not reproduce | ${stale} |"
+            [ "$unparsed" -eq 0 ] || echo "| unrecognised finding lines | ${unparsed} |"
+            echo
+            if [ "$new" -gt 0 ]; then
+              echo "### New findings"
+              echo
+              echo '```'
+              while IFS= read -r key; do
+                grep -F "$key" findings.detail | cut -f4- || printf '%s\n' "$key"
+              done < findings.new
+              echo '```'
+              echo
+              echo "To accept these, add to \`${BASELINE:-your baseline file}\`:"
+              echo
+              echo '```'
+              cat findings.new
+              echo '```'
+            fi
+            if [ "$stale" -gt 0 ]; then
+              echo "### Baseline entries that did not reproduce"
+              echo
+              echo "Delete these lines; the findings they accept are gone."
+              echo
+              echo '```'
+              cat baseline.stale
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          status=0
+
+          # Follows the gate rather than overriding it. An unrecognised line
+          # means this job may be missing findings -- rchk's output format
+          # having moved, most likely -- which makes the gate unsound and has
+          # to fail while it is on. With the gate off nothing is being gated,
+          # and turning a caller's informational job red because rchk changed
+          # a message would break the promise the default makes.
+          if [ "$unparsed" -gt 0 ]; then
+            if [ "$FAIL_ON_FINDINGS" = "true" ]; then
+              echo "::error::${unparsed} line(s) look like findings but do not match any format this job knows"
+              status=1
+            else
+              echo "::warning::${unparsed} line(s) look like findings but could not be keyed"
+            fi
+            cat findings.unparsed
+          fi
+
+          if [ "$new" -gt 0 ]; then
+            echo "----- new findings -----"
+            cat findings.new
+            if [ "$FAIL_ON_FINDINGS" = "true" ]; then
+              echo "::error::rchk reported ${new} finding(s) not in the baseline"
+              status=1
+            else
+              echo "::warning::rchk reported ${new} finding(s); review the rchk-output artifact"
+            fi
+          fi
+
+          if [ "$stale" -gt 0 ]; then
+            echo "----- baseline entries that did not reproduce -----"
+            cat baseline.stale
+            if [ "$FAIL_ON_FINDINGS" = "true" ]; then
+              echo "::error::${stale} baseline entry/entries no longer reproduce; delete them"
+              status=1
+            else
+              echo "::warning::${stale} baseline entry/entries no longer reproduce; delete them"
+            fi
+          fi
+
+          if [ "$new" -eq 0 ] && [ "$stale" -eq 0 ] && [ "$unparsed" -eq 0 ]; then
+            echo "rchk found no PROTECT issues outside the baseline."
+          fi
+
+          exit "$status"
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: rchk-output
-          path: rchk-output.txt
+          path: |
+            rchk-output.txt
+            findings.keys
+            findings.detail
+            findings.unparsed
+          if-no-files-found: ignore
