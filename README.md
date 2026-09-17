@@ -405,6 +405,55 @@ jobs:
       fail-on-findings: true
 ```
 
+### `analyzers.yml` — static analysis, starting with `-fanalyzer`
+
+The other two static checks here are narrow on purpose: `rchk.yml` reasons
+about R's PROTECT discipline, `lto.yml` catches declarations drifting between
+translation units. Neither looks at allocator lifecycle, which is the bug
+class a vendored C parser actually carries — leak on an error path, free of a
+partially built node, use after the stream is torn down.
+
+GCC's `-fanalyzer` is a symbolic-execution pass covering exactly those:
+`-Wanalyzer-double-free`, `-Wanalyzer-use-after-free`,
+`-Wanalyzer-malloc-leak`, `-Wanalyzer-null-dereference`,
+`-Wanalyzer-file-leak`. Unlike ASan and valgrind, which only see paths
+something actually ran, it reaches code no test executes.
+
+```yaml
+jobs:
+  analyzers:
+    uses: pedrobtz/r-actions/.github/workflows/analyzers.yml@v1
+```
+
+It builds in an R-hub GCC container, writes a per-check table to the job
+summary, uploads the build log, and — by default — does not fail the build.
+That is the same trajectory `rchk.yml` takes, for the same reason: the known
+cost of `-fanalyzer` is false positives on unusual control flow, and a package
+meeting it for the first time should not be blocked while it works through
+them. Turn the gate on once it is at zero.
+
+```yaml
+jobs:
+  analyzers:
+    uses: pedrobtz/r-actions/.github/workflows/analyzers.yml@v1
+    with:
+      fail-on-findings: true
+      exclude: |
+        src/cyaml*.c
+      container: ubuntu-gcc16      # default
+      analyzer-flags: -fanalyzer   # default
+      timeout-minutes: 45          # default
+```
+
+`exclude` is for vendored third-party sources: you are not going to fix
+upstream's findings, and a report full of them is one people learn to skip.
+Patterns match the same way `vendor.yml`'s do — an entry with no glob
+character is a directory prefix, anything else is a glob — and are written
+repo-relative (`src/cyaml*.c`) even though R compiles from inside `src/` and
+the compiler says `cyaml.c`; the job puts the path back before matching.
+Excluded findings are still shown in the summary, under their own heading,
+rather than dropped.
+
 ## Usage
 
 ### R CMD check

@@ -1,0 +1,332 @@
+# Static analysis of the package's C, starting with GCC's -fanalyzer.
+#
+# The two static checks already here are narrow on purpose: rchk reasons
+# about R's PROTECT discipline, lto catches declarations drifting between
+# translation units. Neither looks at allocator lifecycle, and that is the
+# bug class a vendored C parser actually carries -- leak on an error path,
+# free of a partially built node, use after the stream is torn down.
+#
+# -fanalyzer is a symbolic-execution pass covering exactly those paths:
+# -Wanalyzer-double-free, -Wanalyzer-use-after-free, -Wanalyzer-malloc-leak,
+# -Wanalyzer-null-dereference, -Wanalyzer-file-leak. It reaches code no test
+# executes, which is what distinguishes it from ASan and valgrind -- those
+# only see paths something actually ran.
+#
+# It reports rather than gates, by default, and for the same reason rchk
+# does: its known cost is false positives on unusual control flow. The
+# intended progression is the one rchk documents on fail-on-findings -- adopt
+# it informational, watch it come back clean, turn the gate on then.
+on:
+  workflow_call:
+    inputs:
+      container:
+        description: >
+          R-hub container to build in. Names come from
+          https://r-hub.github.io/containers/.
+
+          The default is the image r-cmd-check.yml already uses for CRAN's
+          debian-gcc flavor, so a caller running both is not pulling a second
+          toolchain for this. -fanalyzer has improved enough since GCC 12
+          that the version matters: an older compiler both misses findings
+          and invents more of them.
+        type: string
+        required: false
+        default: ubuntu-gcc16
+      analyzer-flags:
+        description: >
+          The analysis flags themselves, appended to the image's CFLAGS.
+
+          Left as an input because -fanalyzer has sub-options worth reaching
+          for on a package that has already absorbed the defaults --
+          -fanalyzer-transitivity, or a larger --param analyzer-max-enodes
+          for a function it gives up on.
+        type: string
+        required: false
+        default: -fanalyzer
+      exclude:
+        description: >
+          Paths whose findings are reported but never gated on, one entry per
+          line. An entry with no glob character is a directory prefix;
+          anything else is matched as a shell glob against each path.
+
+              exclude: |
+                src/cyaml*.c
+                src/vendor
+
+          Vendored third-party sources are what this is for. A caller is not
+          going to fix upstream's findings, and a report full of them is one
+          people learn to skip -- the same argument .covrignore makes about
+          coverage, and the same matching vendor.yml uses for the same
+          reason.
+
+          Excluded findings still appear in the summary, under their own
+          heading. Hiding them would make this file a place where a real
+          finding could go to be forgotten.
+        type: string
+        required: false
+        default: ""
+      fail-on-findings:
+        description: >
+          Fail the job when the analyzer reports anything outside `exclude`,
+          instead of reporting and moving on.
+
+          Off by default, on the same reasoning rchk.yml spells out: a
+          package meeting this check for the first time should not have its
+          build blocked while it works through findings that need human
+          judgement. Once it is at zero the calculation reverses -- the next
+          finding is a regression, and a summary nobody opens is not how you
+          learn about it.
+        type: boolean
+        required: false
+        default: false
+      timeout-minutes:
+        description: >
+          Job timeout. Symbolic execution is not free: -fanalyzer multiplies
+          compile time by a factor that depends on how branchy the code is,
+          and it is slowest on exactly the deeply nested error handling this
+          job exists to look at.
+        type: number
+        required: false
+        default: 45
+
+name: analyzers
+
+permissions: read-all
+
+jobs:
+  fanalyzer:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    name: -fanalyzer (${{ inputs.container }})
+
+    container:
+      image: ghcr.io/r-hub/containers/${{ inputs.container }}:latest
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Nothing to analyse without C
+        id: probe
+        run: |
+          set -eu
+          if [ ! -d src ]; then
+            echo "No src/ directory: nothing to analyse."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # -fanalyzer is GCC's. Clang's nearest equivalent is the static
+      # analyzer driven through scan-build or clang-tidy's clang-analyzer-*
+      # checks, which is a different tool with a different invocation -- so a
+      # clang image cannot silently stand in for a GCC one here. Said out
+      # loud rather than skipped quietly.
+      - name: Check the compiler is GCC
+        if: steps.probe.outputs.skip == 'false'
+        run: |
+          set -eu
+          cc="$(R CMD config CC || true)"
+          case "$cc" in
+            *gcc*|*g++*) echo "ok  compiler is '${cc}'" ;;
+            *)
+              echo "::error::-fanalyzer is a GCC option, and ${{ inputs.container }} compiles with '${cc}'."
+              echo "::error::Use a GCC image, or drive clang's analyzer instead."
+              exit 1
+              ;;
+          esac
+          gcc --version | head -1
+
+      # Hard dependencies only. This job compiles the package and reads the
+      # warnings; it never runs the tests, so Suggests buy nothing and a
+      # Suggests that fails to build would fail the job for no reason. What
+      # is needed is LinkingTo headers, and dependencies = NA covers those.
+      - name: Install hard dependencies
+        if: steps.probe.outputs.skip == 'false'
+        run: |
+          set -eu
+          Rscript -e 'pak::local_install_deps(".", dependencies = NA, upgrade = FALSE)'
+
+      # `+=` against whatever user Makevars the image already uses, never
+      # R_MAKEVARS_USER pointed somewhere new: that variable replaces the
+      # file rather than adding to it, and these images configure their
+      # toolchain through it. Same reasoning, at length, in r-cmd-check.yml.
+      #
+      # -fdiagnostics-plain-output keeps the analyzer's output parseable:
+      # without it GCC may wrap long messages to the terminal width and emit
+      # colour escapes, and a diagnostic split across two lines is one this
+      # job's parser will not see.
+      - name: Turn the analyzer on
+        if: steps.probe.outputs.skip == 'false'
+        env:
+          ANALYZER_FLAGS: ${{ inputs.analyzer-flags }}
+        run: |
+          set -eu
+          target="${R_MAKEVARS_USER:-${HOME}/.R/Makevars}"
+          mkdir -p "$(dirname "$target")"
+          printf 'CFLAGS += %s -fdiagnostics-plain-output\n' "$ANALYZER_FLAGS" >> "$target"
+          echo "--- appended to ${target} ---"
+          cat "$target"
+
+      # --preclean, for the reason the sanitizer jobs give: a stale object
+      # newer than its source is not recompiled, and a job that analysed
+      # nothing looks exactly like a job that found nothing.
+      #
+      # The build is allowed to fail without ending the step, so the log is
+      # still parsed and uploaded -- but its status is carried to the end.
+      # -fanalyzer occasionally runs a compiler out of memory on a large
+      # function, and that is worth seeing rather than having it arrive as a
+      # bare non-zero exit.
+      - name: Build under the analyzer
+        if: steps.probe.outputs.skip == 'false'
+        id: build
+        run: |
+          set -eu
+          status=0
+          R CMD INSTALL --preclean --library="$(mktemp -d)" . > analyzer-build.log 2>&1 || status=$?
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          tail -40 analyzer-build.log
+          if [ "$status" -ne 0 ]; then
+            echo "::warning::the build exited ${status}; findings below may be incomplete"
+          fi
+
+      - name: Report findings
+        if: steps.probe.outputs.skip == 'false'
+        env:
+          EXCLUDE: ${{ inputs.exclude }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+          BUILD_STATUS: ${{ steps.build.outputs.status }}
+        run: |
+          set -eu
+
+          # GCC writes one diagnostic per line as
+          #   path/file.c:12:5: warning: double-'free' of 'p' [-Wanalyzer-double-free]
+          # and the analyzer's are exactly those whose bracketed name starts
+          # -Wanalyzer-. Matching on that rather than on "warning:" keeps
+          # every ordinary compiler warning out of this report: those belong
+          # to r-cmd-check.yml, which already runs -Wall -pedantic the way
+          # CRAN does.
+          # [a-z0-9-] and trailing space tolerated deliberately: a pattern
+          # too strict here drops a real finding silently, which is the one
+          # direction this must not fail in.
+          grep -E '\[-Wanalyzer-[a-z0-9-]+\][[:space:]]*$' analyzer-build.log \
+            > findings.raw 2>/dev/null || true
+
+          # R builds a package from inside src/, so the compiler names the
+          # file as `cyaml.c`, not `src/cyaml.c` -- visible in any rchk or
+          # install log as `-c cyaml.c -o cyaml.o`. Left alone, an exclude of
+          # `src/cyaml*.c` would match nothing at all, and quietly: the
+          # caller would see a report full of vendored findings and no
+          # indication their pattern was wrong.
+          #
+          # So each path is put back into repo-relative form when src/ holds
+          # it, which is also the form vendor.yml's patterns are written in.
+          # A caller writes one spelling for both workflows.
+          : > findings.all
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            file="${line%%:*}"
+            rest="${line#*:}"
+            if [ ! -e "$file" ] && [ -e "src/$file" ]; then
+              printf 'src/%s:%s\n' "$file" "$rest" >> findings.all
+            else
+              printf '%s\n' "$line" >> findings.all
+            fi
+          done < findings.raw
+
+          : > /tmp/patterns
+          if [ -n "$EXCLUDE" ]; then
+            printf '%s\n' "$EXCLUDE" > /tmp/patterns
+          fi
+
+          # An entry with no glob character is a directory prefix; anything
+          # else is a glob. The pattern must stay unquoted on the right of
+          # `case`, or it compares literals and matches nothing -- the same
+          # trap, and the same fix, as vendor.yml.
+          : > findings.gated
+          : > findings.excluded
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            file="${line%%:*}"
+            hit=""
+            while IFS= read -r pat; do
+              [ -n "$pat" ] || continue
+              case "$pat" in
+                *[*?[]*) case "$file" in $pat) hit=1 ;; esac ;;
+                *)       case "$file" in "${pat%/}"/*) hit=1 ;; esac ;;
+              esac
+              if [ -n "$hit" ]; then break; fi
+            done < /tmp/patterns
+            if [ -n "$hit" ]; then
+              printf '%s\n' "$line" >> findings.excluded
+            else
+              printf '%s\n' "$line" >> findings.gated
+            fi
+          done < findings.all
+
+          gated=$(wc -l < findings.gated | tr -d ' ')
+          excluded=$(wc -l < findings.excluded | tr -d ' ')
+
+          # A table keyed on the check, because the first question asked of
+          # this report is which kinds of finding there are, not where the
+          # third one is.
+          {
+            echo "## Static analysis: -fanalyzer"
+            echo
+            echo "**${gated} finding(s)**, plus ${excluded} in excluded paths."
+            echo
+            if [ "$gated" -gt 0 ]; then
+              echo "| Check | Count |"
+              echo "|:------|------:|"
+              sed -E 's/.*\[(-Wanalyzer-[a-z0-9-]+)\][[:space:]]*$/\1/' findings.gated \
+                | sort | uniq -c | sort -rn \
+                | while read -r n check; do echo "| \`${check}\` | ${n} |"; done
+              echo
+              echo '```'
+              cat findings.gated
+              echo '```'
+            fi
+            if [ "$excluded" -gt 0 ]; then
+              echo
+              echo "<details><summary>${excluded} finding(s) in excluded paths</summary>"
+              echo
+              echo '```'
+              cat findings.excluded
+              echo '```'
+              echo
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "----- -fanalyzer summary -----"
+          echo "${gated} finding(s) outside excluded paths, ${excluded} inside."
+          if [ "$gated" -gt 0 ]; then cat findings.gated; fi
+
+          # The build's own status outlives the report: a compile that died
+          # is a failure whatever the analyzer did or did not say first.
+          if [ "${BUILD_STATUS}" -ne 0 ]; then
+            echo "::error::the package failed to build under ${{ inputs.analyzer-flags }}"
+            exit 1
+          fi
+
+          if [ "$gated" -gt 0 ]; then
+            if [ "$FAIL_ON_FINDINGS" = "true" ]; then
+              echo "::error::-fanalyzer reported ${gated} finding(s)"
+              exit 1
+            fi
+            echo "::warning::-fanalyzer reported ${gated} finding(s); see the job summary"
+          else
+            echo "-fanalyzer reported nothing outside excluded paths."
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.probe.outputs.skip == 'false'
+        with:
+          name: analyzer-${{ inputs.container }}
+          path: |
+            analyzer-build.log
+            findings.all
+          if-no-files-found: ignore
