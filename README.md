@@ -708,6 +708,57 @@ raise. It is empty by default, because the right pattern is package-specific.
 
 Keep `run` small — it runs once per allocation in the sweep, so this belongs
 on a schedule. `max-allocations` caps the sweep.
+### `arch.yml` — architectures the check matrix never reaches
+
+`r-cmd-check.yml` covers CRAN's compilers well and its architectures barely at
+all: everything there is x86_64 glibc. C code has portability bugs the
+compiler cannot see, and they surface as arithmetic that is correct on exactly
+one target.
+
+| leg | why |
+|:--|:--|
+| **32-bit** | `size_t` narrows to 32 bits and pointers halve. Every size and depth bound is arithmetic that behaves differently, and a limit computed as a product can overflow here while being nowhere near the limit on 64-bit. |
+| **musl** | A different libc, and the differences bite C parsers specifically: much smaller default thread stack, stricter `printf` on some conversions, no glibc extensions. |
+
+```yaml
+on:
+  schedule:
+    - cron: "0 5 * * 2"
+
+jobs:
+  arch:
+    uses: pedrobtz/r-actions/.github/workflows/arch.yml@v1
+```
+
+**Neither default leg needs QEMU.** Alpine is an ordinary amd64 image, and
+`linux/386` is x86 code the same CPU executes directly, so the emulation this
+is assumed to require is only involved for a non-x86 target such as aarch64 —
+and the workflow skips the QEMU setup for the legs that do not need it. It is
+still slow enough to belong on a schedule, because these images have no binary
+repository for your dependencies and anything with compiled code is built from
+source inside the container.
+
+aarch64 is deliberately *not* in the default matrix. It is worth having, and
+it is also the platform much of the world now develops on, so its bugs tend to
+be found already — and it is the leg that actually costs emulation. Add it
+when a release is near:
+
+```yaml
+    with:
+      targets: >-
+        [{"name": "aarch64", "platform": "linux/arm64",
+          "image": "arm64v8/debian:bookworm",
+          "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev"}]
+```
+
+Each leg prints `uname -m`, `.Machine$sizeof.pointer` and
+`.Machine$integer.max` before checking anything. A 32-bit leg that quietly ran
+64-bit R would pass and mean nothing — the same argument the `nold` and
+`nosuggests` jobs make with their own probes.
+
+`--as-cran` is absent on purpose: this job asks whether the code is correct on
+another architecture, and policy and URL checks answer nothing new here while
+adding failure modes that have nothing to do with the architecture.
 
 ### `analyzers.yml` — static analysis, starting with `-fanalyzer`
 

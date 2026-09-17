@@ -1,0 +1,186 @@
+# Run the suite on architectures the check matrix never reaches.
+#
+# r-cmd-check.yml covers CRAN's compilers well and its architectures barely at
+# all: everything there is x86_64 glibc. C code has portability bugs the
+# compiler cannot see, and they surface as arithmetic that is correct on
+# exactly one target.
+#
+# The two that matter most for a parser:
+#
+#   32-bit   size_t narrows to 32 bits and pointers halve. Every size and
+#            depth bound is arithmetic that behaves differently, and a limit
+#            computed as a product can overflow here while being nowhere near
+#            the limit on 64-bit. This is the highest-value missing leg.
+#
+#   musl     A different libc, and the differences bite C parsers
+#            specifically: a much smaller default thread stack, stricter
+#            printf behaviour on some conversions, no glibc extensions. Code
+#            that recurses, or that leans on a glibc-ism without noticing,
+#            fails here and nowhere else.
+#
+# Worth knowing before reaching for the emulation this is assumed to need:
+# both of those run *natively* on a GitHub x86-64 runner. Alpine is an
+# ordinary amd64 image, and linux/386 is x86 code the same CPU executes
+# directly. QEMU is only involved for a non-x86 leg such as aarch64, so the
+# expensive part of this workflow is optional and is not where the value is.
+#
+# Still slow enough to belong on a schedule: these images have no binary
+# repository for the package's dependencies, so anything with compiled code is
+# built from source inside the container.
+on:
+  workflow_call:
+    inputs:
+      targets:
+        description: >
+          JSON array of targets. Each entry is
+
+              name      label for the job
+              platform  docker platform, e.g. linux/386
+              image     container image
+              setup     shell command installing R and a toolchain
+
+          The default covers the two legs with the best ratio -- 32-bit and
+          musl -- and both of them run without emulation on an x86-64 runner.
+
+          aarch64 is deliberately not in the default. It is worth having, and
+          it is also the platform a large part of the world now develops on,
+          so its bugs tend to be found already -- and it is the leg that
+          actually costs QEMU. Add it when a release is near:
+
+              {"name": "aarch64", "platform": "linux/arm64",
+               "image": "arm64v8/debian:bookworm",
+               "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev"}
+        type: string
+        required: false
+        default: >-
+          [{"name": "i386", "platform": "linux/386",
+            "image": "i386/debian:bookworm",
+            "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev"},
+           {"name": "musl", "platform": "linux/amd64",
+            "image": "alpine:3.21",
+            "setup": "apk add --no-cache R R-dev R-doc build-base"}]
+      install-dependencies:
+        description: >
+          Command run inside the container to install the package's
+          dependencies, before the check.
+
+          Deliberately plain install.packages rather than pak: these images
+          have no binary repository for the package's dependencies, pak buys
+          nothing where everything is built from source anyway, and pak itself
+          would have to be built first on a platform it publishes no binary
+          for.
+
+          Set to "" for a package with no dependencies, which is the case this
+          runs fastest in and the case a vendored-C package is often in.
+        type: string
+        required: false
+        default: >-
+          Rscript -e 'if (length(rd <- setdiff(unlist(tools::package_dependencies(".", db = installed.packages(), which = "most")), rownames(installed.packages())))) install.packages(rd, repos = "https://cloud.r-project.org")'
+      check-args:
+        description: >
+          Arguments to R CMD check inside the container.
+
+          --as-cran is absent on purpose. This job asks whether the code is
+          correct on another architecture, and --as-cran adds policy and URL
+          checks that answer nothing new here while adding failure modes that
+          have nothing to do with the architecture. r-cmd-check.yml is where
+          --as-cran belongs.
+        type: string
+        required: false
+        default: --no-manual --no-build-vignettes
+      timeout-minutes:
+        description: >
+          Per-target timeout. Dependencies are built from source in these
+          containers, and an emulated leg multiplies that by roughly ten.
+        type: number
+        required: false
+        default: 120
+
+name: arch
+
+permissions: read-all
+
+jobs:
+  arch:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(inputs.targets) }}
+
+    name: ${{ matrix.target.name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only for a leg the host cannot execute itself. linux/386 is x86 code
+      # on an x86-64 CPU and linux/amd64 is the host, so registering QEMU for
+      # either is setup time bought for nothing.
+      - name: Set up QEMU
+        if: ${{ !startsWith(matrix.target.platform, 'linux/amd64') && !startsWith(matrix.target.platform, 'linux/386') }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Check on ${{ matrix.target.name }}
+        env:
+          PLATFORM: ${{ matrix.target.platform }}
+          IMAGE: ${{ matrix.target.image }}
+          SETUP: ${{ matrix.target.setup }}
+          INSTALL_DEPS: ${{ inputs.install-dependencies }}
+          CHECK_ARGS: ${{ inputs.check-args }}
+        run: |
+          set -eu
+          # Written outside the workspace and mounted separately. A stray
+          # file at the top level of the package directory is one R CMD check
+          # reports as a non-standard file, so a helper script left in the
+          # checkout would make this leg fail on itself.
+          mkdir -p "${RUNNER_TEMP}/arch"
+          cat > "${RUNNER_TEMP}/arch/run.sh" <<'SCRIPT'
+          set -eu
+          cd /pkg
+
+          echo "----- platform -----"
+          uname -m
+          echo "----- R -----"
+          R --version | head -1
+          # The leg is only worth anything if it really is the architecture it
+          # claims to be, so this is printed rather than assumed. A 32-bit leg
+          # that silently ran 64-bit R would pass and mean nothing -- the same
+          # argument the nold and nosuggests jobs make with their own probes.
+          Rscript -e 'cat("pointer size:", .Machine$sizeof.pointer, "bytes\n"); cat("integer max:", .Machine$integer.max, "\n")'
+
+          if [ -n "${INSTALL_DEPS}" ]; then
+            echo "----- dependencies -----"
+            sh -c "${INSTALL_DEPS}"
+          fi
+
+          echo "----- build -----"
+          R CMD build --no-build-vignettes --no-manual .
+          tarball=$(ls -t ./*.tar.gz | head -1)
+
+          echo "----- check -----"
+          # Suggests are not forced: these images have no binaries, and a
+          # suggested package that will not build here would fail the leg for
+          # a reason that is not about the architecture.
+          _R_CHECK_FORCE_SUGGESTS_=false R CMD check ${CHECK_ARGS} "${tarball}"
+          SCRIPT
+
+          docker run --rm \
+            --platform "${PLATFORM}" \
+            -v "${GITHUB_WORKSPACE}:/pkg" \
+            -v "${RUNNER_TEMP}/arch:/arch:ro" \
+            -w /pkg \
+            -e INSTALL_DEPS="${INSTALL_DEPS}" \
+            -e CHECK_ARGS="${CHECK_ARGS}" \
+            "${IMAGE}" \
+            sh -c "${SETUP} && sh /arch/run.sh"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arch-${{ matrix.target.name }}
+          path: |
+            *.Rcheck/00check.log
+            *.Rcheck/00install.out
+          if-no-files-found: ignore
