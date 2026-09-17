@@ -562,6 +562,54 @@ jobs:
       fail-on-findings: true
 ```
 
+#### A baseline, so the gate survives its first false positive
+
+`fail-on-findings` alone is a boolean, and a boolean has one bad day in it.
+The first time rchk reports a false positive against a package that has
+already turned the gate on, the choices are to leave CI red on something that
+is not a bug, or to set `fail-on-findings: false` and lose the gate entirely —
+including for the real regression next month. The second is what actually
+happens, because a red check everyone knows is wrong gets routed around within
+a day.
+
+`baseline` is a checked-in file of accepted findings. The job then fails only
+on findings that are *not* in it — the same shape, and the same reason, as
+`valgrind.yml`'s `suppressions`.
+
+```yaml
+jobs:
+  rchk:
+    uses: pedrobtz/r-actions/.github/workflows/rchk.yml@v1
+    with:
+      fail-on-findings: true
+      baseline: tools/rchk.baseline
+```
+
+One finding per line, three tab-separated fields — tag, function, file — with
+`#` comments ignored:
+
+```
+# upstream false positive: v is protected by the caller
+UP	cyaml_parse_document	src/zuyaml_parse.c
+```
+
+You do not have to write these by hand. When the job finds something unlisted
+it prints the exact lines to add.
+
+The key is deliberately **not** the line number, the message, or the path rchk
+actually prints. Line numbers move with any edit above them, and rchk builds
+the package in a directory with a random name — its own README shows
+`/rchk/trunk/packages/build/IsnsJjDm/jpeg/src/read.c` — so a baseline keyed on
+what rchk prints would match nothing on the next run and look exactly like a
+package that had fixed everything. Paths are cut back to `src/…` first. The
+cost is that two findings of the same tag in one function collapse to one
+entry; that is the trade, and it is the right way round.
+
+A baseline entry that **stops reproducing** is also an error. Without that the
+file only ever grows: entries accumulate, nobody removes them, and eventually
+one suppresses a real finding it happens to match. Making a disappeared entry
+fail means fixing the code forces you to delete its line, so the file shrinks
+over time instead.
 ### `analyzers.yml` — static analysis, starting with `-fanalyzer`
 
 The other two static checks here are narrow on purpose: `rchk.yml` reasons
