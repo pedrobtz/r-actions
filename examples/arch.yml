@@ -1,0 +1,16 @@
+on:
+  schedule:
+    # Weekly, and before a release. Dependencies are built from source in
+    # these containers, so this is not a per-push job.
+    - cron: "0 5 * * 2"
+  workflow_dispatch:
+
+name: arch
+
+jobs:
+  arch:
+    uses: pedrobtz/r-actions/.github/workflows/arch.yml@v1
+    # A package with no dependencies runs this fastest; drop the line to let
+    # the default install them inside the container.
+    with:
+      install-dependencies: ""
