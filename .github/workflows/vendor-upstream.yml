@@ -1,0 +1,302 @@
+# Watch upstream for new releases of a vendored library.
+#
+# vendor.yml guards vendored code against *drift*: a PR that changes the
+# vendored paths without updating the manifest. That is the right guard for
+# "someone edited the bundled library by hand", and it says nothing at all
+# about *staleness* -- the vendored copy being an old version of something
+# upstream has since fixed. A package can sit on a pinned version
+# indefinitely, every check green, while upstream ships a bounds fix for the
+# parser it bundles.
+#
+# This is the gap Dependabot and OSV-Scanner fill for npm and PyPI. Vendored
+# C has none of that machinery: no manifest a scanner recognises, no registry
+# to query. Vendoring trades a system dependency for the job of watching
+# upstream yourself, and this automates that half.
+#
+# A separate workflow rather than a job inside vendor.yml, deliberately.
+# vendor.yml is `permissions: read-all` and gates merges; this one needs
+# `issues: write` to be useful. A notifier that runs on a schedule has no
+# business sharing a permission block with a guard that runs on every PR.
+on:
+  workflow_call:
+    inputs:
+      upstream-repo:
+        description: >
+          The upstream repository as `owner/name`, queried through the
+          releases and tags APIs.
+        type: string
+        required: true
+      current-version:
+        description: >
+          Shell command printing the pinned version, and nothing else, run
+          from the repository root.
+
+          A command rather than a path, because every package records this
+          differently and none of them should have to move it to adopt this.
+          A vendoring script holds it in a variable, a header carries it as a
+          #define, a manifest has a column for it:
+
+              current-version: sed -n 's/^CYAML_VERSION=//p' tools/vendor-cyaml.sh
+
+          Leading `v` is stripped from both sides before comparing, so `1.2.3`
+          and `v1.2.3` are the same version.
+        type: string
+        required: true
+      on-new-version:
+        description: >
+          What to do when the versions differ: `issue` opens one (or updates
+          the one it already opened), `summary` only writes the job summary.
+
+          `issue` is the default because the job summary of a scheduled run
+          is not a place anyone looks. It needs `issues: write` from the
+          caller; the job says so plainly rather than failing at the API call
+          if the grant is missing.
+        type: string
+        required: false
+        default: issue
+      include-prereleases:
+        description: >
+          Consider prereleases and drafts when deciding what "latest" is.
+          Off by default: a package vendoring a prerelease of its parser is
+          doing something deliberate, and should not be nagged toward one.
+        type: boolean
+        required: false
+        default: false
+      labels:
+        description: >
+          Comma-separated labels for the issue this opens. Left empty by
+          default because a label that does not exist in the caller's
+          repository makes the API call fail, and a notifier that fails to
+          notify is worse than one with an unlabelled issue.
+        type: string
+        required: false
+        default: ""
+
+name: vendor-upstream
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  upstream:
+    runs-on: ubuntu-latest
+    name: vendored library is current
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the pinned version
+        id: pinned
+        env:
+          VERSION_COMMAND: ${{ inputs.current-version }}
+        run: |
+          set -euo pipefail
+          version="$(sh -c "$VERSION_COMMAND" | tr -d '[:space:]')"
+          if [ -z "$version" ]; then
+            echo "::error::current-version printed nothing."
+            echo "::error::Command was: ${VERSION_COMMAND}"
+            exit 1
+          fi
+          echo "version=${version#v}" >> "$GITHUB_OUTPUT"
+          echo "pinned: ${version}"
+
+      # Releases first, tags as the fallback. Plenty of C libraries tag
+      # without ever filling in a release, and a watcher that only understood
+      # releases would report "no upstream version" forever on exactly those
+      # projects -- quietly, which is the failure mode that matters for a job
+      # nobody watches.
+      - name: Ask upstream what the latest version is
+        id: upstream
+        env:
+          UPSTREAM: ${{ inputs.upstream-repo }}
+          PRERELEASES: ${{ inputs.include-prereleases }}
+        run: |
+          set -euo pipefail
+          latest=""
+          source=""
+
+          # Read through the exit status, never through the output.
+          #
+          # `gh api --jq` prints the API's error body to *stdout* on failure,
+          # so `$(gh api ... || true)` on a repository with no releases
+          # yields the 130 characters of {"message":"Not Found",...} rather
+          # than the empty string. Every emptiness test below would then pass
+          # on that blob: the tags fallback would not fire, and the job would
+          # open an issue reporting upstream's latest version as a fragment
+          # of JSON.
+          try_api() {
+            if out="$(gh api "$1" --jq "$2" 2>/dev/null)"; then
+              printf '%s' "$out"
+            fi
+          }
+
+          if [ "$PRERELEASES" = "true" ]; then
+            latest="$(try_api "repos/${UPSTREAM}/releases" '.[0].tag_name // empty')"
+            source="releases (including prereleases)"
+          else
+            latest="$(try_api "repos/${UPSTREAM}/releases/latest" '.tag_name // empty')"
+            source="latest release"
+          fi
+
+          if [ -z "$latest" ]; then
+            latest="$(try_api "repos/${UPSTREAM}/tags" '.[0].name // empty')"
+            source="most recent tag"
+          fi
+
+          if [ -z "$latest" ]; then
+            echo "::error::could not read a release or tag from ${UPSTREAM}."
+            echo "::error::Check that the repository exists and is public."
+            exit 1
+          fi
+
+          echo "version=${latest#v}" >> "$GITHUB_OUTPUT"
+          echo "source=${source}" >> "$GITHUB_OUTPUT"
+          echo "upstream: ${latest} (${source})"
+
+      # Published repository advisories, which is the one advisory source
+      # that is actually queryable for a vendored C library: it is keyed on
+      # the repository rather than on a package name in an ecosystem the
+      # library does not belong to. Best effort -- a repository that has
+      # never published one returns an empty list, and so does one where the
+      # endpoint is unavailable, and those are not distinguishable here.
+      - name: Check for published advisories
+        id: advisories
+        env:
+          UPSTREAM: ${{ inputs.upstream-repo }}
+        run: |
+          set -euo pipefail
+          # Same trap as the step above: on 403 or 404 the error body lands
+          # on stdout, and redirecting it into the file would turn a failed
+          # request into a fabricated advisory in the issue text.
+          : > advisories.md
+          if out="$(gh api "repos/${UPSTREAM}/security-advisories" \
+              --jq '.[] | select(.state == "published") | "- **\(.ghsa_id)** (\(.severity // "unknown")): \(.summary)"' \
+              2>/dev/null)"; then
+            printf '%s' "$out" > advisories.md
+          fi
+          # A trailing newline on a non-empty file, none on an empty one, so
+          # the line count is the advisory count.
+          if [ -s advisories.md ]; then printf '\n' >> advisories.md; fi
+          count=$(wc -l < advisories.md | tr -d ' ')
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          if [ "$count" -gt 0 ]; then
+            echo "${count} published advisory/advisories for ${UPSTREAM}:"
+            cat advisories.md
+          else
+            echo "No published advisories for ${UPSTREAM}."
+          fi
+
+      # Difference, not ordering. Comparing arbitrary version strings for
+      # which is newer needs a scheme this workflow cannot know it has --
+      # date stamps, calendar versions and plain integers all appear in C
+      # libraries. A difference is the thing worth a human's attention
+      # either way, and saying "these differ" is a claim this job can
+      # actually support.
+      - name: Compare, and report
+        id: compare
+        env:
+          PINNED: ${{ steps.pinned.outputs.version }}
+          LATEST: ${{ steps.upstream.outputs.version }}
+          SOURCE: ${{ steps.upstream.outputs.source }}
+          UPSTREAM: ${{ inputs.upstream-repo }}
+          ADVISORY_COUNT: ${{ steps.advisories.outputs.count }}
+        run: |
+          set -euo pipefail
+          if [ "$PINNED" = "$LATEST" ]; then
+            echo "differs=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Vendored library is current"
+              echo
+              echo "\`${UPSTREAM}\` is at **${LATEST}**, and that is what is vendored."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "up to date: ${PINNED}"
+          else
+            echo "differs=true" >> "$GITHUB_OUTPUT"
+            echo "up to date: no (vendored ${PINNED}, upstream ${LATEST})"
+          fi
+
+          {
+            echo "## Vendored: \`${UPSTREAM}\`"
+            echo
+            echo "| | version |"
+            echo "|:--|:--|"
+            echo "| vendored here | \`${PINNED}\` |"
+            echo "| upstream ${SOURCE} | \`${LATEST}\` |"
+            echo
+            if [ "${ADVISORY_COUNT}" -gt 0 ]; then
+              echo "### Published advisories"
+              echo
+              cat advisories.md
+              echo
+            fi
+          } > report.md
+
+          if [ "$PINNED" != "$LATEST" ]; then
+            cat report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # One issue, reused. A scheduled job that opens a fresh issue every
+      # week produces a backlog of identical tickets and teaches people to
+      # close this one unread, so the body carries a marker and the job
+      # edits the issue it finds rather than adding to the pile.
+      #
+      # Never fails the workflow on a difference. A new upstream release is
+      # information, not a defect: a red X on an unrelated PR for it is the
+      # kind of signal people route around, and routing around this one means
+      # routing around the vendor guard beside it.
+      - name: Open or update the issue
+        if: steps.compare.outputs.differs == 'true' && inputs.on-new-version == 'issue'
+        env:
+          PINNED: ${{ steps.pinned.outputs.version }}
+          LATEST: ${{ steps.upstream.outputs.version }}
+          UPSTREAM: ${{ inputs.upstream-repo }}
+          ADVISORY_COUNT: ${{ steps.advisories.outputs.count }}
+          LABELS: ${{ inputs.labels }}
+        run: |
+          set -euo pipefail
+          marker="<!-- r-actions:vendor-upstream:${UPSTREAM} -->"
+
+          if [ "${ADVISORY_COUNT}" -gt 0 ]; then
+            title="Vendored ${UPSTREAM} is at ${PINNED}; ${LATEST} is out, and advisories are published"
+          else
+            title="Vendored ${UPSTREAM} is at ${PINNED}; upstream is at ${LATEST}"
+          fi
+
+          {
+            cat report.md
+            echo
+            echo "Vendored code is updated through this package's own fetch-and-record"
+            echo "tooling, so that the tree stays reproducible and \`vendor.yml\` keeps"
+            echo "passing. This issue is opened by a scheduled job and edited in place"
+            echo "as upstream moves; closing it is fine, and it will not reopen unless"
+            echo "the version changes again."
+            echo
+            echo "${marker}"
+          } > issue-body.md
+
+          # Search by marker, not by title: the title carries version numbers
+          # and changes every time upstream does, which would make every
+          # search miss and every run open a new issue.
+          existing="$(gh issue list --state open --limit 100 \
+              --json number,body \
+              --jq "map(select(.body | contains(\"${marker}\"))) | .[0].number // empty")"
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --title "$title" --body-file issue-body.md
+            echo "updated issue #${existing}"
+          else
+            if [ -n "$LABELS" ]; then
+              gh issue create --title "$title" --body-file issue-body.md --label "$LABELS"
+            else
+              gh issue create --title "$title" --body-file issue-body.md
+            fi
+          fi
+
+      - name: Say what would have been opened
+        if: steps.compare.outputs.differs == 'true' && inputs.on-new-version != 'issue'
+        run: |
+          echo "::notice::vendored version differs from upstream; see the job summary"
