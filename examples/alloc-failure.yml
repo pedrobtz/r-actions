@@ -1,0 +1,16 @@
+on:
+  schedule:
+    # The sweep restarts the interpreter once per allocation, so this is a
+    # scheduled job rather than a per-push one.
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+
+name: alloc-failure
+
+jobs:
+  alloc-failure:
+    uses: pedrobtz/r-actions/.github/workflows/alloc-failure.yml@v1
+    with:
+      run: Rscript tools/alloc-exercise.R
+      expect-pattern: "cannot allocate|memory exhausted"
+      max-allocations: 300

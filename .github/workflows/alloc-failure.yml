@@ -1,0 +1,357 @@
+# Allocation-failure injection: run the package repeatedly, failing a
+# different allocation each time.
+#
+# Allocation failure is the least-tested path in any C library, because
+# nothing in an ordinary test run ever makes malloc fail. The handling exists
+# -- a parser returns an error code, the R layer unwinds, frees the stream and
+# raises a condition -- and it is almost certainly executed zero times by the
+# suite.
+#
+# Nothing else here reaches it. ASan and valgrind check what happens to memory
+# that *was* allocated. gctorture forces collections, not failures. rchk
+# reasons about PROTECT, not about a NULL return. The conformance corpus and
+# the fuzzer feed input to a parser that always gets the memory it asks for.
+#
+# This matters most for a parser handed untrusted input. An attacker who can
+# drive allocation volume -- deep nesting, a large alias expansion, a long
+# scalar -- can reach the OOM path on purpose, and if that path double-frees
+# or leaks the stream, the same input is a denial of service. Every other
+# check in this repository would report green.
+#
+# The sweep is the expensive part, so this belongs on a schedule.
+on:
+  workflow_call:
+    inputs:
+      run:
+        description: >
+          Command that exercises the package, run once per injected failure.
+          Keep it short: it runs once for every allocation in the sweep.
+
+              run: Rscript tools/alloc-exercise.R
+
+          A small driver aimed at the paths that allocate beats the whole
+          suite here, both because the sweep multiplies its cost and because
+          a failure is easier to attribute when less is happening.
+        type: string
+        required: true
+      baseline-run:
+        description: >
+          Command that starts the same interpreter and does nothing, used to
+          measure how many allocations happen before the package is reached.
+
+          This is not optional bookkeeping, it is what makes the results
+          mean anything. Measured on a trivial C program: 193 of its 197
+          allocations happen before `main` runs at all, in the runtime's own
+          startup. Failing those kills the process every time, in a way that
+          has nothing to do with the code under test -- a sweep from N=1
+          would report a wall of crashes and bury the one real finding.
+          Starting above this floor is what isolated the genuine bug in
+          testing.
+
+          The default starts R and evaluates nothing. Override it if `run`
+          uses a different interpreter.
+        type: string
+        required: false
+        default: Rscript -e 'invisible(NULL)'
+      max-allocations:
+        description: >
+          Cap on how many allocations to sweep, counted from the floor. The
+          sweep otherwise runs to the end of what the run actually allocated,
+          which for a real workload can be a very large number of process
+          starts.
+        type: number
+        required: false
+        default: 300
+      expect-pattern:
+        description: >
+          Extended regular expression the output must match when an
+          allocation has been failed.
+
+          Surviving the failure is necessary and not sufficient: a package
+          that swallows the error and returns a truncated document has not
+          crashed and has not behaved. Setting this to the error the package
+          is supposed to raise turns the sweep into a check that the failure
+          surfaces as a condition rather than as silence.
+
+              expect-pattern: "cannot allocate|memory exhausted"
+
+          Empty by default, because the right pattern is package-specific and
+          a wrong one would fail every iteration.
+        type: string
+        required: false
+        default: ""
+      timeout-minutes:
+        type: number
+        required: false
+        default: 60
+
+name: alloc-failure
+
+permissions: read-all
+
+jobs:
+  alloc-failure:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          dependencies: '"all"'
+
+      - name: Install the package
+        run: R CMD INSTALL --preclean .
+
+      # Written here rather than vendored as a file, so there is one place to
+      # read and nothing to keep in sync.
+      #
+      # The awkward part is bootstrapping. dlsym itself may allocate on some
+      # libcs, and an interposed malloc that calls dlsym to find the real
+      # malloc would recurse forever. Allocations made while resolving are
+      # served from a static arena instead, and realloc has to recognise a
+      # pointer into that arena because the program will hand one back.
+      - name: Build the allocation interposer
+        run: |
+          set -eu
+          cat > failmalloc.c <<'CSRC'
+          #define _GNU_SOURCE
+          #include <dlfcn.h>
+          #include <errno.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+
+          static void *(*real_malloc)(size_t);
+          static void *(*real_calloc)(size_t, size_t);
+          static void *(*real_realloc)(void *, size_t);
+
+          static long fail_at = 0;   /* 0 disables injection */
+          static long counter = 0;
+          static int  ready = 0;
+          static int  resolving = 0;
+
+          static char   arena[1 << 16];
+          static size_t arena_used = 0;
+
+          static void *arena_alloc(size_t n) {
+            size_t a = (n + 15u) & ~(size_t)15u;
+            if (arena_used + a > sizeof arena) return NULL;
+            void *p = arena + arena_used;
+            arena_used += a;
+            return p;
+          }
+
+          static int from_arena(void *p) {
+            return (char *)p >= arena && (char *)p < arena + sizeof arena;
+          }
+
+          static void init(void) {
+            if (ready || resolving) return;
+            resolving = 1;
+            real_malloc  = (void *(*)(size_t))         dlsym(RTLD_NEXT, "malloc");
+            real_calloc  = (void *(*)(size_t, size_t)) dlsym(RTLD_NEXT, "calloc");
+            real_realloc = (void *(*)(void *, size_t)) dlsym(RTLD_NEXT, "realloc");
+            const char *e = getenv("ALLOC_FAIL_AT");
+            fail_at = e ? atol(e) : 0;
+            resolving = 0;
+            ready = 1;
+          }
+
+          /* Counts every allocation whether or not one is being failed, so a
+             pass with injection off reports how many there are to sweep. */
+          static int should_fail(void) {
+            long n = ++counter;
+            return fail_at > 0 && n == fail_at;
+          }
+
+          void *malloc(size_t size) {
+            if (resolving) return arena_alloc(size);
+            init();
+            if (!real_malloc) return arena_alloc(size);
+            if (should_fail()) { errno = ENOMEM; return NULL; }
+            return real_malloc(size);
+          }
+
+          void *calloc(size_t nmemb, size_t size) {
+            if (resolving || !real_calloc) {
+              void *p = arena_alloc(nmemb * size);
+              if (!resolving) init();
+              if (p) memset(p, 0, nmemb * size);
+              return p;
+            }
+            init();
+            if (should_fail()) { errno = ENOMEM; return NULL; }
+            return real_calloc(nmemb, size);
+          }
+
+          void *realloc(void *ptr, size_t size) {
+            init();
+            if (from_arena(ptr)) {
+              void *p = malloc(size);
+              if (p && ptr) memcpy(p, ptr, size);
+              return p;
+            }
+            if (!real_realloc) return arena_alloc(size);
+            if (should_fail()) { errno = ENOMEM; return NULL; }
+            return real_realloc(ptr, size);
+          }
+
+          __attribute__((destructor))
+          static void report(void) {
+            const char *path = getenv("ALLOC_COUNT_FILE");
+            if (!path) return;
+            FILE *f = fopen(path, "w");
+            if (!f) return;
+            fprintf(f, "%ld\n", counter);
+            fclose(f);
+          }
+          CSRC
+          gcc -shared -fPIC -O1 -o failmalloc.so failmalloc.c -ldl
+          echo "ok  interposer built"
+
+      # Two counting passes, no injection. The floor is what the interpreter
+      # spends before the package is reached; the total is everything the
+      # workload allocates. The sweep is the gap between them.
+      - name: Measure the sweep range
+        id: range
+        env:
+          RUN_COMMAND: ${{ inputs.run }}
+          BASELINE_COMMAND: ${{ inputs.baseline-run }}
+          CAP: ${{ inputs.max-allocations }}
+        run: |
+          set -eu
+          export LD_PRELOAD="${GITHUB_WORKSPACE}/failmalloc.so"
+
+          ALLOC_COUNT_FILE="${GITHUB_WORKSPACE}/floor.count" \
+            sh -c "$BASELINE_COMMAND" >/dev/null 2>&1 || true
+          ALLOC_COUNT_FILE="${GITHUB_WORKSPACE}/total.count" \
+            sh -c "$RUN_COMMAND" >/dev/null 2>&1 || true
+          unset LD_PRELOAD
+
+          floor=$(cat floor.count 2>/dev/null || echo 0)
+          total=$(cat total.count 2>/dev/null || echo 0)
+
+          if [ "$total" -le 0 ]; then
+            echo "::error::the interposer counted no allocations; LD_PRELOAD did not take effect"
+            exit 1
+          fi
+
+          start=$((floor + 1))
+          end="$total"
+          if [ "$end" -gt $((floor + CAP)) ]; then end=$((floor + CAP)); fi
+          if [ "$start" -gt "$end" ]; then
+            echo "::warning::the workload allocated nothing beyond interpreter startup"
+            start=0; end=0
+          fi
+
+          echo "floor=${floor}" >> "$GITHUB_OUTPUT"
+          echo "total=${total}" >> "$GITHUB_OUTPUT"
+          echo "start=${start}" >> "$GITHUB_OUTPUT"
+          echo "end=${end}"     >> "$GITHUB_OUTPUT"
+          echo "startup floor: ${floor}   workload total: ${total}"
+          echo "sweeping ${start}..${end}"
+
+      # An exit status of 128+n is death by signal n, which is the finding
+      # this job exists for: the allocation failed, nothing handled it, and
+      # the process died rather than returning an error. An ordinary non-zero
+      # exit is the opposite -- the error was raised and propagated, which is
+      # what should happen.
+      - name: Sweep
+        id: sweep
+        env:
+          RUN_COMMAND: ${{ inputs.run }}
+          EXPECT: ${{ inputs.expect-pattern }}
+          START: ${{ steps.range.outputs.start }}
+          END: ${{ steps.range.outputs.end }}
+        run: |
+          set -eu
+          : > crashes.txt
+          : > silent.txt
+          checked=0
+
+          n="$START"
+          while [ "$n" -le "$END" ] && [ "$END" -gt 0 ]; do
+            checked=$((checked + 1))
+            set +e
+            LD_PRELOAD="${GITHUB_WORKSPACE}/failmalloc.so" ALLOC_FAIL_AT="$n" \
+              sh -c "$RUN_COMMAND" > "out.${n}" 2>&1
+            status=$?
+            set -e
+
+            if [ "$status" -ge 128 ]; then
+              echo "N=${n} died on signal $((status - 128))"
+              {
+                echo "### allocation ${n}: signal $((status - 128))"
+                sed -n '1,20p' "out.${n}"
+              } >> crashes.txt
+            elif [ -n "$EXPECT" ] && [ "$status" -ne 0 ]; then
+              if ! grep -qE "$EXPECT" "out.${n}"; then
+                echo "N=${n} failed without matching expect-pattern"
+                {
+                  echo "### allocation ${n}: exit ${status}, no match for /${EXPECT}/"
+                  sed -n '1,20p' "out.${n}"
+                } >> silent.txt
+              fi
+            fi
+            rm -f "out.${n}"
+            n=$((n + 1))
+          done
+
+          crashes=$(grep -c '^### ' crashes.txt || true)
+          silent=$(grep -c '^### ' silent.txt || true)
+          echo "checked=${checked}" >> "$GITHUB_OUTPUT"
+          echo "crashes=${crashes}" >> "$GITHUB_OUTPUT"
+          echo "silent=${silent}"   >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Allocation-failure injection"
+            echo
+            echo "| | |"
+            echo "|:--|--:|"
+            echo "| allocations before the workload | ${{ steps.range.outputs.floor }} |"
+            echo "| allocations in the workload | ${{ steps.range.outputs.total }} |"
+            echo "| failures injected | ${checked} |"
+            echo "| **died on a signal** | ${crashes} |"
+            [ -z "$EXPECT" ] || echo "| errored without matching the pattern | ${silent} |"
+            echo
+            if [ "$crashes" -gt 0 ]; then
+              echo '```'
+              cat crashes.txt
+              echo '```'
+            fi
+            if [ "$silent" -gt 0 ]; then
+              echo '```'
+              cat silent.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$crashes" -gt 0 ]; then
+            echo "::error::${crashes} injected allocation failure(s) killed the process"
+            exit 1
+          fi
+          if [ "$silent" -gt 0 ]; then
+            echo "::error::${silent} injected failure(s) errored without matching expect-pattern"
+            exit 1
+          fi
+          echo "all ${checked} injected allocation failures were handled."
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: alloc-failure
+          path: |
+            crashes.txt
+            silent.txt
+            failmalloc.c
+          if-no-files-found: ignore
