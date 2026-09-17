@@ -120,6 +120,42 @@ on:
         type: string
         required: false
         default: 'c("--no-manual")'
+      nosuggests:
+        description: >
+          Run the `nosuggests` job: R CMD check in the R-hub `nosuggests`
+          image, with only hard dependencies installed.
+
+          This is CRAN's `r-devel-linux-x86_64-debian-gcc` NOSUGGESTS flavor,
+          and it fails differently from every other job here. It does not ask
+          whether the package compiles or whether its tests pass; it asks
+          whether the package *degrades* when its suggested packages are
+          absent. A test file calling `library(testthat)` at top level, or an
+          example using a Suggests package without a guard, errors here and
+          nowhere else.
+
+          Off by default, because a package with no Suggests learns nothing
+          from it.
+        type: boolean
+        required: false
+        default: false
+      nold:
+        description: >
+          Run the `nold` job: R CMD check in the R-hub `nold` image, which is
+          R built `--disable-long-double`.
+
+          CRAN's `r-devel-linux-x86_64-debian-gcc` NOLD flavor. It catches
+          arithmetic that silently relies on 80-bit intermediates -- most
+          often in numeric parsing, formatting and comparison, so it is worth
+          having for a package that converts text to numbers.
+
+          `container-makevars` is deliberately not applied to this job. That
+          input exists to make an image compile the way a CRAN *compiler*
+          flavor does, and this is a configuration flavor: appending
+          `-std=gnu23` to whatever toolchain the image ships is unrelated to
+          what it tests, and would fail outright on a compiler predating C23.
+        type: boolean
+        required: false
+        default: false
       timeout-minutes:
         description: Job timeout in minutes, for both jobs.
         type: number
@@ -327,5 +363,178 @@ jobs:
         if: always()
         with:
           name: check-${{ matrix.container }}
+          path: check
+          if-no-files-found: ignore
+
+  # CRAN's NOSUGGESTS flavor: does the package degrade when its suggested
+  # packages are absent, or does it error?
+  #
+  # Everything else in this repo asks whether the code is correct. This asks
+  # whether the *declarations* are honest -- whether a package that lists a
+  # dependency under Suggests actually treats it as optional. The usual
+  # failures are a test file with a bare `library(pkg)` at top level, and an
+  # example that uses a Suggests package without `@examplesIf` or a guard.
+  #
+  # `dependencies = NA` is the whole point: hard dependencies only, no
+  # Suggests. Using the containers job with `dependencies = TRUE` instead
+  # would install them and report a confident green having tested nothing.
+  #
+  # `_R_CHECK_FORCE_SUGGESTS_=false` is what makes a missing Suggests a
+  # skipped check rather than an ERROR from R CMD check itself; the image
+  # sets it too, and it is repeated here so the job does not depend on that.
+  #
+  # Known imperfection, stated rather than hidden: rcmdcheck depends on withr,
+  # so installing it reinstates withr even though a caller may list it under
+  # Suggests. The flavor still covers every other suggested package, and the
+  # alternative -- running R CMD check by hand and grepping 00check.log for
+  # WARNING -- reimplements `error_on = "warning"` to recover one package.
+  nosuggests:
+    if: inputs.nosuggests
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    name: nosuggests
+
+    container:
+      image: ghcr.io/r-hub/containers/nosuggests:latest
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install hard dependencies only
+        run: |
+          set -eu
+          Rscript -e 'pak::local_install_deps(".", dependencies = NA, upgrade = FALSE)'
+          Rscript -e 'pak::pkg_install("any::rcmdcheck", upgrade = FALSE)'
+
+      # The log to read when this job fails and the others pass. The question
+      # is always "which suggested package was actually missing", and the
+      # answer is here rather than in the check output.
+      - name: Record which suggested packages are absent
+        shell: Rscript {0}
+        run: |
+          sug <- read.dcf("DESCRIPTION")[1, "Suggests"]
+          if (is.na(sug)) { cat("No Suggests declared.\n"); quit(save = "no") }
+          pkgs <- trimws(sub("[(].*", "", strsplit(sug, ",")[[1]]))
+          pkgs <- pkgs[nzchar(pkgs)]
+          have <- vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)
+          cat(sprintf("%-20s %s\n", pkgs, ifelse(have, "installed", "ABSENT")), sep = "")
+
+      - name: Apply caller environment
+        if: inputs.env != ''
+        env:
+          CALLER_ENV: ${{ inputs.env }}
+        run: |
+          set -eu
+          printf '%s\n' "$CALLER_ENV" | while IFS= read -r line; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+              *) echo "Ignoring malformed env line: $line" >&2 ;;
+            esac
+          done
+
+      - name: Run R CMD check
+        shell: Rscript {0}
+        env:
+          _R_CHECK_FORCE_SUGGESTS_: "false"
+        run: |
+          rcmdcheck::rcmdcheck(
+            args = ${{ inputs.args }},
+            build_args = c("--no-manual"),
+            error_on = "warning",
+            check_dir = "check"
+          )
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: check-nosuggests
+          path: check
+          if-no-files-found: ignore
+
+  # CRAN's NOLD flavor: R built --disable-long-double.
+  #
+  # On x86 Linux, C `long double` is 80-bit, and R uses it for accumulating
+  # sums and in parts of its numeric printing. Code that happens to be correct
+  # only because of those extra bits gives different answers here -- which is
+  # why this flavor exists, and why it is worth running for anything that
+  # converts between text and numbers.
+  #
+  # Suggests are installed: unlike the job above, this one wants the test
+  # suite to run in full, since a numeric difference shows up as a failing
+  # test rather than as a check condition.
+  #
+  # No container-makevars. See the input's description: this image is not a
+  # compiler flavor, and the override belongs only to those that are.
+  nold:
+    if: inputs.nold
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    name: nold
+
+    container:
+      image: ghcr.io/r-hub/containers/nold:latest
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Proves the image is what the job name claims. R reports the size of
+      # its long double as capabilities("long.double"); FALSE is the whole
+      # reason this job exists, and TRUE means the image is not what we think.
+      - name: Record the long double configuration
+        shell: Rscript {0}
+        run: |
+          cat("R version:      ", R.version.string, "\n", sep = "")
+          cat("long double:    ", capabilities("long.double"), "\n", sep = "")
+          cat("sizeof(LDOUBLE):", .Machine$sizeof.longdouble, "\n", sep = "")
+          if (isTRUE(capabilities("long.double")))
+            stop("This image has long double enabled; it is not the nold flavor.")
+
+      - name: Install dependencies
+        run: |
+          set -eu
+          Rscript -e 'pak::local_install_deps(".", dependencies = TRUE, upgrade = FALSE)'
+          Rscript -e 'pak::pkg_install("any::rcmdcheck", upgrade = FALSE)'
+
+      - name: Apply caller environment
+        if: inputs.env != ''
+        env:
+          CALLER_ENV: ${{ inputs.env }}
+        run: |
+          set -eu
+          printf '%s\n' "$CALLER_ENV" | while IFS= read -r line; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+              *) echo "Ignoring malformed env line: $line" >&2 ;;
+            esac
+          done
+
+      - name: Run R CMD check
+        shell: Rscript {0}
+        env:
+          _R_CHECK_FORCE_SUGGESTS_: "false"
+        run: |
+          rcmdcheck::rcmdcheck(
+            args = ${{ inputs.args }},
+            build_args = c("--no-manual"),
+            error_on = "warning",
+            check_dir = "check"
+          )
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: check-nold
           path: check
           if-no-files-found: ignore
