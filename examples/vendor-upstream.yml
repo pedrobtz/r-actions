@@ -1,0 +1,18 @@
+on:
+  schedule:
+    # Weekly. A new upstream release is not urgent, and a daily job that
+    # finds nothing 364 times a year is one people stop reading.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+name: vendor-upstream
+
+jobs:
+  upstream:
+    uses: pedrobtz/r-actions/.github/workflows/vendor-upstream.yml@v1
+    permissions:
+      contents: read
+      issues: write
+    with:
+      upstream-repo: tlsa/libcyaml
+      current-version: sed -n 's/^CYAML_VERSION=//p' tools/vendor-cyaml.sh

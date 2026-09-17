@@ -348,6 +348,61 @@ bundled files and not mine", so the guard would either watch nothing or fire
 on every commit, and a guard that fires on everything is one people learn to
 ignore.
 
+### `vendor-upstream.yml` — is the vendored library stale?
+
+`vendor.yml` above guards against **drift** — someone editing the bundled
+library by hand. It says nothing about **staleness**: the vendored copy being
+an old version of something upstream has since fixed. A package can sit on a
+pinned version indefinitely, every check green, while upstream ships a bounds
+fix for the parser it bundles.
+
+This is the gap Dependabot fills for npm and PyPI. Vendored C has none of that
+machinery — no manifest a scanner recognises, no registry to query — so
+vendoring trades a system dependency for the job of watching upstream
+yourself, and this automates that half.
+
+Run it on a schedule. It reads your pinned version, asks upstream what the
+latest is, and opens an issue when they differ — editing that same issue on
+later runs rather than opening a new one each week.
+
+```yaml
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  upstream:
+    uses: pedrobtz/r-actions/.github/workflows/vendor-upstream.yml@v1
+    permissions:
+      contents: read
+      issues: write
+    with:
+      upstream-repo: tlsa/libcyaml
+      current-version: sed -n 's/^CYAML_VERSION=//p' tools/vendor-cyaml.sh
+```
+
+`current-version` is a command rather than a path, because every package
+records this differently and none should have to move it to adopt this — a
+vendoring script holds it in a variable, a header as a `#define`, a manifest
+in a column. A leading `v` is stripped from both sides.
+
+It **never fails the check**. A new upstream release is information, not a
+defect, and a red X on unrelated PRs is the kind of signal people route around
+— including, eventually, the vendor guard sitting next to it. Set
+`on-new-version: summary` to skip the issue and only write the job summary,
+`include-prereleases: true` to count prereleases, and `labels:` to tag the
+issue (left empty by default, because a label that does not exist in your
+repository makes the API call fail).
+
+It also reports any **published security advisories** on the upstream
+repository. That is best-effort: it is keyed on the repository rather than on
+a package name in an ecosystem a vendored C library does not belong to, and a
+project that publishes advisories elsewhere will show none here.
+
+> **Note:** this workflow opens issues, so the caller must grant
+> `issues: write`.
+
 ### `valgrind.yml` — Valgrind
 
 Runs `R CMD check --use-valgrind` under R-release, then **scans the check
@@ -557,6 +612,12 @@ jobs:
     permissions:
       contents: write
 ```
+
+### Watching a vendored library
+
+Copy [`examples/vendor-upstream.yml`](examples/vendor-upstream.yml) into your
+package as `.github/workflows/vendor-upstream.yml` and point it at the
+upstream repository.
 
 ### Run all native checks together
 
