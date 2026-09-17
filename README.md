@@ -662,6 +662,52 @@ scheduled one accumulate into one campaign.
 
 A finding fails the job, and the input that caused it is uploaded as an
 artifact so it can be replayed.
+### `alloc-failure.yml` — does the OOM path work?
+
+Allocation failure is the least-tested path in any C library, because nothing
+in an ordinary test run ever makes `malloc` fail. The handling exists — the
+parser returns an error code, the R layer unwinds, frees the stream and raises
+a condition — and it is almost certainly executed zero times by your suite.
+
+Nothing else here reaches it. ASan and valgrind check what happens to memory
+that *was* allocated. `gctorture.yml` forces collections, not failures.
+`rchk.yml` reasons about PROTECT, not about a NULL return.
+
+This job `LD_PRELOAD`s a small interposer that fails the Nth allocation and
+passes everything else through, then sweeps N — running your command once per
+value and checking the process reports an error instead of dying.
+
+```yaml
+jobs:
+  alloc-failure:
+    uses: pedrobtz/r-actions/.github/workflows/alloc-failure.yml@v1
+    with:
+      run: Rscript tools/alloc-exercise.R
+      expect-pattern: "cannot allocate|memory exhausted"
+```
+
+**It does not sweep from N=1**, and that is the detail that makes the results
+mean anything. Measured on a trivial C program: 193 of its 197 allocations
+happen before `main` runs at all, in the runtime's own startup. Failing those
+kills the process every time for reasons that have nothing to do with your
+code, and a sweep from 1 would bury the one real finding under a wall of them.
+So `baseline-run` starts the same interpreter and does nothing, to establish
+the floor, and the sweep covers the gap between that and what the workload
+actually allocates. In testing, sweeping above the floor isolated the one
+genuinely unhandled allocation exactly.
+
+An exit status of 128+n is death by signal n — the allocation failed, nothing
+handled it, and the process died rather than returning an error. That is the
+finding. An ordinary non-zero exit is the *opposite*: the error was raised and
+propagated, which is what should happen.
+
+`expect-pattern` is what turns "did not crash" into "behaved". A package that
+swallows the failure and returns a truncated document has not crashed and has
+not behaved either; set this to the condition the package is supposed to
+raise. It is empty by default, because the right pattern is package-specific.
+
+Keep `run` small — it runs once per allocation in the sweep, so this belongs
+on a schedule. `max-allocations` caps the sweep.
 
 ### `analyzers.yml` — static analysis, starting with `-fanalyzer`
 
