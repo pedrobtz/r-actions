@@ -87,7 +87,32 @@ jobs:
         run: |
           set -eu
           base="origin/${{ github.base_ref }}"
-          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          # Not --depth=1. A shallow fetch writes .git/shallow and grafts
+          # the base ref, so its ancestry cannot be walked and `$base...HEAD`
+          # has no merge base to resolve:
+          #
+          #   fatal: origin/main...HEAD: no merge base
+          #
+          # which is exit 128, and set -e fails the step before the guard has
+          # looked at a single path. It is intermittent, which is worse than
+          # being broken: it passes whenever the fork point happens to be at
+          # or after the graft, and fails as soon as the base has moved ahead
+          # of where the branch forked -- exactly what happens while a stack
+          # of pull requests is being merged one at a time.
+          #
+          # The checkout above is already fetch-depth: 0, so a full fetch
+          # costs nothing here. The unshallow branch is for a caller whose
+          # checkout was shallow before this step ran: once .git/shallow
+          # exists, an ordinary fetch does not remove it.
+          if [ -f "$(git rev-parse --git-dir)/shallow" ]; then
+            git fetch --no-tags --unshallow origin "${{ github.base_ref }}"
+          else
+            git fetch --no-tags origin "${{ github.base_ref }}"
+          fi
+          # Three dots, deliberately: the guard asks what this pull request
+          # changed, not how it differs from a base that may have moved
+          # underneath it. Two dots would blame a branch for vendored changes
+          # someone else landed on the base while it was open.
           changed=$(git diff --name-only "$base"...HEAD)
           printf '%s\n' "$changed" > /tmp/vendor-changed-all
 
