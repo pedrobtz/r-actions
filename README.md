@@ -136,10 +136,17 @@ Measures test coverage with [covr](https://covr.r-lib.org/), writes a
 per-file breakdown to the job summary, and commits a self-hosted SVG badge to
 `.github/badges/coverage.svg` on every push to `main`/`master` (avoiding
 external badge services). The badge colour thresholds are: green ≥ 90 %,
-yellow ≥ 75 %, orange ≥ 60 %, red below 60 %.
+yellow ≥ 75 %, orange ≥ 60 %, red below 60 %. The badge is rendered from a
+template in the workflow itself, so the job that can write to your repository
+downloads nothing to do it.
+
+It runs as two jobs. `coverage` runs covr — and so the package's tests, and
+its dependencies — with a read-only token. `badge` holds the write token, runs
+only on `push`, and does nothing but render the SVG and commit it.
 
 > **Note:** this workflow commits back to the repository, so the caller must
-> grant `contents: write`.
+> grant `contents: write`. That grant is the ceiling for the whole workflow;
+> only the `badge` job requests it.
 
 ```yaml
 jobs:

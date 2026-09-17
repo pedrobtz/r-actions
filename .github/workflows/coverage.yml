@@ -3,12 +3,29 @@ on:
 
 name: coverage
 
-permissions:
-  contents: write
+# No workflow-level `permissions` block, deliberately: the two jobs need
+# different tokens and say so individually. A default here would be a third
+# thing to keep in sync with them, and the one that governs any job that
+# forgets to declare its own.
+#
+# The caller still grants `contents: write`, because a reusable workflow's
+# token is capped by the caller's grant -- that is the ceiling, and the job
+# blocks below are what each job actually gets.
 
 jobs:
+  # Runs the caller's test suite, and therefore the caller's dependencies,
+  # under a read-only token. This is the whole reason the badge lives in a
+  # separate job: covr executes arbitrary package code by design, and it has
+  # no reason to do it while holding a token that can push to main.
   coverage:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    outputs:
+      pct: ${{ steps.coverage.outputs.pct }}
+      color: ${{ steps.coverage.outputs.color }}
 
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
@@ -32,10 +49,14 @@ jobs:
         run: |
           cov <- covr::package_coverage(quiet = FALSE)
           pct <- covr::percent_coverage(cov)
+          # Emitted as hex rather than as a colour name, because the renderer
+          # downstream is now a template in this repository and not a tool
+          # with a colour vocabulary. These are badgen's own values, so the
+          # badge does not change appearance on the commit that removed it.
           color <-
-            if (pct >= 90) "green" else
-            if (pct >= 75) "yellow" else
-            if (pct >= 60) "orange" else "red"
+            if (pct >= 90) "#3C1" else
+            if (pct >= 75) "#DB1" else
+            if (pct >= 60) "#F73" else "#E43"
           cat(sprintf("pct=%.1f\n", pct), file = Sys.getenv("GITHUB_OUTPUT"), append = TRUE)
           cat(sprintf("color=%s\n", color), file = Sys.getenv("GITHUB_OUTPUT"), append = TRUE)
 
@@ -60,15 +81,106 @@ jobs:
           )
           writeLines(md, Sys.getenv("GITHUB_STEP_SUMMARY"))
 
+  # The only job here that can write to the caller's repository, and it runs
+  # nothing but git and a heredoc.
+  badge:
+    needs: coverage
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Rendered here rather than fetched.
+      #
+      # This step used to be `npx badgen-cli`, with no version: the package
+      # was resolved against the npm registry at job start, and its contents
+      # ran in the one job holding a token that can push to a caller's
+      # default branch. Nothing recorded which version had run. Pinning the
+      # version would have fixed the resolution and kept both the network
+      # call and the trust; the badge is a fixed SVG with two substitutions,
+      # so it was cheaper to stop depending on anything at all. It also takes
+      # Node off this job's critical path.
+      #
+      # The geometry is badgen's, reproduced rather than reinvented, so the
+      # badge does not visibly change on the commit that removed the
+      # dependency: box widths, viewBox and colours are identical to what
+      # `badgen-cli --subject covr` emitted, checked against it across the
+      # range of percentages. The one deliberate difference is that the
+      # status label is centred in its box, where badgen places it half a
+      # pixel to the left of centre.
+      #
+      # Coordinates are in tenths of a pixel -- a 10x viewBox scaled down by
+      # the width and height attributes -- which is how badgen keeps its
+      # arithmetic in integers, and how this step can too.
+      #
+      # `textLength` is the part worth understanding. It makes the renderer
+      # fit the glyphs to exactly the declared width, so the box width and
+      # the text width cannot disagree: an estimate that is slightly off
+      # shows up as very slightly tighter or looser letter spacing rather
+      # than as text clipped by its box or floating off-centre in it. That
+      # is what makes it safe to size text here without a font metrics table.
+      #
+      # The two remaining numbers are measured from Verdana at this size, and
+      # only need to hold for the strings actually used. The subject is
+      # always "covr", so its width is the constant badgen computes for it.
+      # The status is always digits, one point and a percent sign.
       - name: Render badge
+        env:
+          PCT: ${{ needs.coverage.outputs.pct }}
+          COLOR: ${{ needs.coverage.outputs.color }}
         run: |
+          set -eu
           mkdir -p .github/badges
-          npx badgen-cli --subject covr --status "${{ steps.coverage.outputs.pct }}%" --color "${{ steps.coverage.outputs.color }}" > .github/badges/coverage.svg
+
+          subject="covr"
+          status="${PCT}%"
+
+          # Per-glyph widths in tenths of a pixel: digit, point, percent.
+          digits=$(printf '%s' "$PCT" | tr -cd '0-9' | wc -c | tr -d ' ')
+          points=$(printf '%s' "$PCT" | tr -cd '.'   | wc -c | tr -d ' ')
+          st=236                                       # "covr", measured
+          vt=$(( digits * 70 + points * 40 + 120 ))
+
+          # 50 of padding on each side of each label.
+          sw=$(( st + 100 ))
+          vw=$(( vt + 100 ))
+          total=$(( sw + vw ))
+
+          # The width attribute is the viewBox scaled back down, and is the
+          # one number here that is not an integer.
+          width=$(printf '%d.%d' $(( total / 10 )) $(( total % 10 )))
+
+          cat > .github/badges/coverage.svg <<EOF
+          <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="20" viewBox="0 0 ${total} 200" role="img" aria-label="${subject}: ${status}">
+          <title>${subject}: ${status}</title>
+          <linearGradient id="gradient" x2="0" y2="100%">
+          <stop offset="0" stop-opacity=".1" stop-color="#EEE"/>
+          <stop offset="1" stop-opacity=".1"/>
+          </linearGradient>
+          <mask id="round"><rect width="${total}" height="200" rx="30" fill="#FFF"/></mask>
+          <g mask="url(#round)">
+          <rect width="${sw}" height="200" fill="#555"/>
+          <rect x="${sw}" width="${vw}" height="200" fill="${COLOR}"/>
+          <rect width="${total}" height="200" fill="url(#gradient)"/>
+          </g>
+          <g aria-hidden="true" text-anchor="start" font-family="Verdana,DejaVu Sans,sans-serif" font-size="110">
+          <text x="60" y="148" textLength="${st}" fill="#000" opacity="0.25">${subject}</text>
+          <text x="50" y="138" textLength="${st}" fill="#fff">${subject}</text>
+          <text x="$(( sw + 60 ))" y="148" textLength="${vt}" fill="#000" opacity="0.25">${status}</text>
+          <text x="$(( sw + 50 ))" y="138" textLength="${vt}" fill="#fff">${status}</text>
+          </g>
+          </svg>
+          EOF
+
+          cat .github/badges/coverage.svg
 
       - name: Commit coverage badge
-        if: github.event_name == 'push'
         env:
-          PCT: ${{ steps.coverage.outputs.pct }}
+          PCT: ${{ needs.coverage.outputs.pct }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
