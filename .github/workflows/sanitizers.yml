@@ -246,6 +246,17 @@ jobs:
             echo "CXX = clang++"
             echo "CFLAGS = ${BASE} ${EXTRA_CHECKS}"
             echo "CXXFLAGS = ${BASE} ${EXTRA_CHECKS}"
+            # A package declaring CXX_STD = CXX20 (or 11, 14, 17) is compiled
+            # with $(CXX20) and $(CXX20FLAGS), not $(CXX)/$(CXXFLAGS). Setting
+            # only the latter leaves such a package compiled by the image's
+            # g++ with no instrumentation, and then linked with the clang-only
+            # LDFLAGS below -- the same "passes without checking anything"
+            # failure the comment above describes, one variable over.
+            # CXXnnSTD is left alone: Makeconf's -std=gnu++nn suits clang++.
+            for std in 11 14 17 20; do
+              echo "CXX${std} = clang++"
+              echo "CXX${std}FLAGS = ${BASE} ${EXTRA_CHECKS}"
+            done
             echo "LDFLAGS = -fsanitize=undefined -shared-libsan -Wl,-rpath,${RTLIB}"
           } >> ~/.R/Makevars
           echo "--- ~/.R/Makevars ---"

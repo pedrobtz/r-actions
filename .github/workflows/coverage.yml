@@ -327,10 +327,15 @@ jobs:
           if [ -n "$RUN_COMMAND" ]; then
             sh -c "$RUN_COMMAND"
           elif [ -d tests ]; then
+            # Run each file from inside tests/, which is where R CMD check
+            # runs it: testthat.R calls test_check(), whose test_dir("testthat")
+            # is relative. From the repository root that resolves to ./testthat,
+            # which does not exist -- no tests run, no .gcda is written, and the
+            # job reports empty coverage as a success.
             for f in tests/*.R; do
               [ -e "$f" ] || continue
               echo "----- $f"
-              Rscript "$f"
+              (cd tests && Rscript "${f#tests/}")
             done
           else
             echo "::warning::no tests/ directory and no native-run; coverage will be empty"

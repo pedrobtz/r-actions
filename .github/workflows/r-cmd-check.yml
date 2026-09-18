@@ -686,6 +686,12 @@ jobs:
             esac
           done
 
+      # --no-build-vignettes on top of --no-manual, which the other two
+      # container jobs do not need. This image installs no Suggests at all by
+      # design, so R CMD build cannot run a vignette engine: a package
+      # declaring VignetteBuilder fails at build time, before the check this
+      # job exists to perform has started. Nothing the caller passes can
+      # avoid it, and no caller of this image wants vignettes built.
       - name: Run R CMD check
         shell: Rscript {0}
         env:
@@ -693,7 +699,7 @@ jobs:
         run: |
           rcmdcheck::rcmdcheck(
             args = ${{ inputs.args }},
-            build_args = c("--no-manual"),
+            build_args = c("--no-manual", "--no-build-vignettes"),
             error_on = ${{ inputs.allowed-warnings == '' && '"warning"' || '"error"' }},
             check_dir = "check"
           )
