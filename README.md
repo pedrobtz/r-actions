@@ -132,7 +132,9 @@ Optional inputs:
 `containers` takes any name from <https://r-hub.github.io/containers/>.
 `ubuntu-next` and `ubuntu-release` are CRAN-like too, but sit closer to what
 the `runners` job already does. `build-args` reaches the `runners` job only:
-the container images carry no LaTeX and no vignette-compaction tooling.
+the container images carry no LaTeX and no vignette-compaction tooling. The
+`nosuggests` job additionally builds with `--no-build-vignettes`, since that
+image installs no Suggests and so has no vignette engine to build with.
 
 #### `rust: true` — R packages wrapping a Rust crate
 
