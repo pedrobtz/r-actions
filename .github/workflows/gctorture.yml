@@ -42,6 +42,40 @@ on:
         type: number
         required: false
         default: 120
+      rust:
+        description: >
+          Install a Rust toolchain before running the suite, for a package
+          whose src/ contains a cargo crate.
+
+          test_local() loads the package with pkgload, which compiles src/ --
+          so this job builds the crate even though nothing about gctorture is
+          Rust-specific. The runner image ships a rustup, but not necessarily
+          one new enough: a crate on edition 2024 needs rustc 1.85, and
+          packages wrapping a Rust library commonly sit above that.
+        type: boolean
+        required: false
+        default: false
+      rust-workspace:
+        description: >
+          Path to the cargo workspace, for the build cache. Ignored when
+          `rust` is false.
+        type: string
+        required: false
+        default: src/rust
+      env:
+        description: >
+          Extra environment variables for the test step, one NAME=VALUE per
+          line, as in r-cmd-check.yml and sanitizers.yml.
+
+          A package that fetches vendored sources at configure time needs
+          this: without a way to set the variable that selects the online
+          path, the build reaches for a release artefact that a development
+          version has not published yet.
+
+          Do not put secrets here: workflow inputs are not masked in logs.
+        type: string
+        required: false
+        default: ""
 
 name: gctorture
 
@@ -58,6 +92,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install a Rust toolchain
+        if: inputs.rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artefacts
+        if: inputs.rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.rust-workspace }}
+          shared-key: gctorture
+          cache-on-failure: true
+
       - uses: r-lib/actions/setup-r@v2
         with:
           r-version: release
@@ -69,6 +115,21 @@ jobs:
             any::testthat
             any::pkgload
           needs: check
+
+      - name: Apply caller environment
+        if: inputs.env != ''
+        shell: bash
+        env:
+          CALLER_ENV: ${{ inputs.env }}
+        run: |
+          set -eu
+          printf '%s\n' "$CALLER_ENV" | while IFS= read -r line; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+              *) echo "Ignoring malformed env line: $line" >&2 ;;
+            esac
+          done
 
       - name: Run tests under gctorture
         shell: Rscript {0}

@@ -170,6 +170,82 @@ on:
         type: string
         required: false
         default: ""
+      rust:
+        description: >
+          Install a Rust toolchain before checking. For a package whose
+          src/ contains a cargo crate -- an R package wrapping a Rust
+          library.
+
+          Off by default, because it costs a toolchain install and a cache
+          restore on every leg of a matrix that mostly does not need one.
+
+          What it does is not merely "install rustc". The GitHub runners
+          already ship a rustup, and on Windows that rustup defaults to an
+          MSVC host while R links with Rtools' GNU toolchain -- an MSVC
+          staticlib cannot be linked by Rtools, so the windows-gnu target
+          has to be added explicitly or the leg fails at link time with an
+          error that names neither cargo nor the target. That is the step
+          every R-plus-Rust package writes for itself, and it is the reason
+          this input exists rather than a line in the README telling callers
+          to add three steps of their own.
+
+          It also pins to rustup's stable rather than whatever the image
+          ships. CRAN packages using Rust routinely require a rustc newer
+          than a distro toolchain carries -- edition 2024 alone needs
+          1.85 -- and the container images below ship no cargo at all.
+        type: boolean
+        required: false
+        default: false
+      rust-workspace:
+        description: >
+          Path to the cargo workspace, for the build cache. The r-rust
+          templates and the packages following them (ggsql, data.fusion)
+          all put the crate at src/rust, so that is the default.
+
+          Ignored when `rust` is false.
+        type: string
+        required: false
+        default: src/rust
+      allowed-warnings:
+        description: >
+          R CMD check warnings that are known, understood, and not to fail
+          the job. One check name per line, matched against the name in
+          `* checking <name> ... WARNING`, as an extended regular
+          expression anchored at both ends. Blank lines and #-comments are
+          ignored.
+
+          Empty by default, which leaves `error_on = "warning"` exactly as
+          it was: a package with no entry here behaves identically.
+
+          This is an allow-list, not a switch. The alternative a package
+          reaches for is `error_on = "error"`, and that gives up every
+          warning to excuse one -- including the compiler diagnostics under
+          "checking whether package can be installed" that are the single
+          most common reason CRAN's pretest rejects a submission. With an
+          allow-list the named warnings pass and any *other* warning still
+          fails the job, so strictness is relocated rather than abandoned.
+          Same shape, and the same argument, as rchk.yml's `baseline` and
+          valgrind.yml's `suppressions`.
+
+          A listed warning that stops appearing does NOT fail the job,
+          unlike an rchk baseline entry. Check warnings are conditional on
+          the flavor -- a URL that resolves from one runner and times out
+          from another, a NOTE that is a WARNING only under --as-cran -- so
+          "this one did not fire here" is the normal case rather than
+          evidence the entry is stale.
+
+          The Rust case this was written for:
+
+            Rust compilation
+
+          `tools:::.check_packages$check_rust()` greps the *install log* for
+          "Downloading crates ...", and is not gated on --as-cran. A package
+          whose vendored sources are fetched at configure time, or which
+          sets NOT_CRAN so cargo resolves online, emits that string on every
+          build and so warns on every leg.
+        type: string
+        required: false
+        default: ""
 
 name: R-CMD-check
 
@@ -196,6 +272,42 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: r-lib/actions/setup-pandoc@v2
+
+      # See the `rust` input. The Windows target is the part that is easy to
+      # miss: rustup's default host there is MSVC, while R links with Rtools'
+      # GNU toolchain, and an MSVC staticlib cannot be linked by Rtools. The
+      # failure is at link time and names neither cargo nor the target.
+      - name: Install a Rust toolchain
+        if: inputs.rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add the Windows GNU Rust target
+        if: inputs.rust && runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          if [ "${RUNNER_ARCH}" = "ARM64" ]; then
+            rustup target add aarch64-pc-windows-gnullvm
+          else
+            rustup target add x86_64-pc-windows-gnu
+          fi
+
+      - name: Record the Rust toolchain
+        if: inputs.rust
+        shell: bash
+        run: |
+          set -eu
+          rustc --version
+          cargo --version
+          rustup target list --installed
+
+      - name: Cache cargo artefacts
+        if: inputs.rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.rust-workspace }}
+          shared-key: ${{ matrix.config.os }}-${{ matrix.config.r }}
+          cache-on-failure: true
 
       # http-user-agent is read from the matrix row and is simply empty for
       # rows that omit it, which is what the r-lib template does too. It
@@ -226,11 +338,62 @@ jobs:
             esac
           done
 
+      # error-on drops to "error" only when the caller listed warnings it
+      # accepts; the gate step below then re-imposes the same strictness
+      # against that list. With no list this is the action's own default.
       - uses: r-lib/actions/check-r-package@v2
         with:
           args: ${{ inputs.args }}
           build_args: ${{ inputs.build-args }}
           upload-snapshots: true
+          error-on: ${{ inputs.allowed-warnings == '' && '"warning"' || '"error"' }}
+
+      # The allow-list is only meaningful if something still reads the log:
+      # with error_on = "error" a WARNING no longer fails rcmdcheck, so this
+      # step is what keeps every unlisted warning fatal. It parses the check
+      # log rather than the exit status for exactly that reason.
+      - name: Fail on any unexpected check warning
+        if: inputs.allowed-warnings != ''
+        shell: bash
+        env:
+          ALLOWED: ${{ inputs.allowed-warnings }}
+        run: |
+          set -eu
+
+          log=$(ls check/*.Rcheck/00check.log 2>/dev/null | head -n 1 || true)
+          if [ -z "$log" ]; then
+            echo "No check/*.Rcheck/00check.log to read: the check did not" >&2
+            echo "get far enough to report warnings." >&2
+            exit 1
+          fi
+
+          pattern=$(printf '%s\n' "$ALLOWED" \
+            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+            | grep -v '^#' | grep -v '^$' \
+            | paste -sd '|' -)
+
+          warnings=$(grep -E '^\* checking .* \.\.\. WARNING$' "$log" \
+            | sed -E 's/^\* checking (.*) \.\.\. WARNING$/\1/' || true)
+
+          if [ -n "$warnings" ]; then
+            echo "--- warnings reported ---"
+            printf '%s\n' "$warnings"
+            echo "--- allowed ---"
+            printf '%s\n' "$pattern"
+          fi
+
+          unexpected=$(printf '%s' "$warnings" | grep -Ev "^(${pattern})$" || true)
+
+          if [ -n "$unexpected" ]; then
+            echo >&2
+            echo "Unexpected R CMD check WARNING(s), not in allowed-warnings:" >&2
+            printf '%s\n' "$unexpected" >&2
+            echo >&2
+            sed -n '/WARNING$/,/^\* checking/p' "$log" >&2
+            exit 1
+          fi
+
+          echo "No warnings outside the allow-list."
 
   containers:
     if: inputs.containers != '[]'
@@ -259,6 +422,25 @@ jobs:
       # standard actually ran. Without it the first question after a
       # surprising result -- "is this image really the flavor I think it is?"
       # -- costs a debugging round trip.
+      # The r-hub images ship no cargo at all, so a package with a crate in
+      # src/ cannot install here without this. rustup's own installer rather
+      # than the distro's, for the reason the `rust` input gives: these
+      # packages routinely need a rustc newer than a distro carries.
+      - name: Install a Rust toolchain
+        if: inputs.rust
+        run: |
+          set -eu
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+
+      - name: Record the Rust toolchain
+        if: inputs.rust
+        run: |
+          set -eu
+          rustc --version
+          cargo --version
+
       - name: Record the toolchain
         run: |
           set -eu
@@ -355,9 +537,56 @@ jobs:
           rcmdcheck::rcmdcheck(
             args = ${{ inputs.args }},
             build_args = c("--no-manual"),
-            error_on = "warning",
+            error_on = ${{ inputs.allowed-warnings == '' && '"warning"' || '"error"' }},
             check_dir = "check"
           )
+
+      # The allow-list is only meaningful if something still reads the log:
+      # with error_on = "error" a WARNING no longer fails rcmdcheck, so this
+      # step is what keeps every unlisted warning fatal. It parses the check
+      # log rather than the exit status for exactly that reason.
+      - name: Fail on any unexpected check warning
+        if: inputs.allowed-warnings != ''
+        shell: bash
+        env:
+          ALLOWED: ${{ inputs.allowed-warnings }}
+        run: |
+          set -eu
+
+          log=$(ls check/*.Rcheck/00check.log 2>/dev/null | head -n 1 || true)
+          if [ -z "$log" ]; then
+            echo "No check/*.Rcheck/00check.log to read: the check did not" >&2
+            echo "get far enough to report warnings." >&2
+            exit 1
+          fi
+
+          pattern=$(printf '%s\n' "$ALLOWED" \
+            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+            | grep -v '^#' | grep -v '^$' \
+            | paste -sd '|' -)
+
+          warnings=$(grep -E '^\* checking .* \.\.\. WARNING$' "$log" \
+            | sed -E 's/^\* checking (.*) \.\.\. WARNING$/\1/' || true)
+
+          if [ -n "$warnings" ]; then
+            echo "--- warnings reported ---"
+            printf '%s\n' "$warnings"
+            echo "--- allowed ---"
+            printf '%s\n' "$pattern"
+          fi
+
+          unexpected=$(printf '%s' "$warnings" | grep -Ev "^(${pattern})$" || true)
+
+          if [ -n "$unexpected" ]; then
+            echo >&2
+            echo "Unexpected R CMD check WARNING(s), not in allowed-warnings:" >&2
+            printf '%s\n' "$unexpected" >&2
+            echo >&2
+            sed -n '/WARNING$/,/^\* checking/p' "$log" >&2
+            exit 1
+          fi
+
+          echo "No warnings outside the allow-list."
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -405,6 +634,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The r-hub images ship no cargo at all, so a package with a crate in
+      # src/ cannot install here without this. rustup's own installer rather
+      # than the distro's, for the reason the `rust` input gives: these
+      # packages routinely need a rustc newer than a distro carries.
+      - name: Install a Rust toolchain
+        if: inputs.rust
+        run: |
+          set -eu
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+
+      - name: Record the Rust toolchain
+        if: inputs.rust
+        run: |
+          set -eu
+          rustc --version
+          cargo --version
+
       - name: Install hard dependencies only
         run: |
           set -eu
@@ -446,9 +694,56 @@ jobs:
           rcmdcheck::rcmdcheck(
             args = ${{ inputs.args }},
             build_args = c("--no-manual"),
-            error_on = "warning",
+            error_on = ${{ inputs.allowed-warnings == '' && '"warning"' || '"error"' }},
             check_dir = "check"
           )
+
+      # The allow-list is only meaningful if something still reads the log:
+      # with error_on = "error" a WARNING no longer fails rcmdcheck, so this
+      # step is what keeps every unlisted warning fatal. It parses the check
+      # log rather than the exit status for exactly that reason.
+      - name: Fail on any unexpected check warning
+        if: inputs.allowed-warnings != ''
+        shell: bash
+        env:
+          ALLOWED: ${{ inputs.allowed-warnings }}
+        run: |
+          set -eu
+
+          log=$(ls check/*.Rcheck/00check.log 2>/dev/null | head -n 1 || true)
+          if [ -z "$log" ]; then
+            echo "No check/*.Rcheck/00check.log to read: the check did not" >&2
+            echo "get far enough to report warnings." >&2
+            exit 1
+          fi
+
+          pattern=$(printf '%s\n' "$ALLOWED" \
+            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+            | grep -v '^#' | grep -v '^$' \
+            | paste -sd '|' -)
+
+          warnings=$(grep -E '^\* checking .* \.\.\. WARNING$' "$log" \
+            | sed -E 's/^\* checking (.*) \.\.\. WARNING$/\1/' || true)
+
+          if [ -n "$warnings" ]; then
+            echo "--- warnings reported ---"
+            printf '%s\n' "$warnings"
+            echo "--- allowed ---"
+            printf '%s\n' "$pattern"
+          fi
+
+          unexpected=$(printf '%s' "$warnings" | grep -Ev "^(${pattern})$" || true)
+
+          if [ -n "$unexpected" ]; then
+            echo >&2
+            echo "Unexpected R CMD check WARNING(s), not in allowed-warnings:" >&2
+            printf '%s\n' "$unexpected" >&2
+            echo >&2
+            sed -n '/WARNING$/,/^\* checking/p' "$log" >&2
+            exit 1
+          fi
+
+          echo "No warnings outside the allow-list."
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -491,6 +786,25 @@ jobs:
       # Proves the image is what the job name claims. R reports the size of
       # its long double as capabilities("long.double"); FALSE is the whole
       # reason this job exists, and TRUE means the image is not what we think.
+      # The r-hub images ship no cargo at all, so a package with a crate in
+      # src/ cannot install here without this. rustup's own installer rather
+      # than the distro's, for the reason the `rust` input gives: these
+      # packages routinely need a rustc newer than a distro carries.
+      - name: Install a Rust toolchain
+        if: inputs.rust
+        run: |
+          set -eu
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+
+      - name: Record the Rust toolchain
+        if: inputs.rust
+        run: |
+          set -eu
+          rustc --version
+          cargo --version
+
       - name: Record the long double configuration
         shell: Rscript {0}
         run: |
@@ -528,9 +842,56 @@ jobs:
           rcmdcheck::rcmdcheck(
             args = ${{ inputs.args }},
             build_args = c("--no-manual"),
-            error_on = "warning",
+            error_on = ${{ inputs.allowed-warnings == '' && '"warning"' || '"error"' }},
             check_dir = "check"
           )
+
+      # The allow-list is only meaningful if something still reads the log:
+      # with error_on = "error" a WARNING no longer fails rcmdcheck, so this
+      # step is what keeps every unlisted warning fatal. It parses the check
+      # log rather than the exit status for exactly that reason.
+      - name: Fail on any unexpected check warning
+        if: inputs.allowed-warnings != ''
+        shell: bash
+        env:
+          ALLOWED: ${{ inputs.allowed-warnings }}
+        run: |
+          set -eu
+
+          log=$(ls check/*.Rcheck/00check.log 2>/dev/null | head -n 1 || true)
+          if [ -z "$log" ]; then
+            echo "No check/*.Rcheck/00check.log to read: the check did not" >&2
+            echo "get far enough to report warnings." >&2
+            exit 1
+          fi
+
+          pattern=$(printf '%s\n' "$ALLOWED" \
+            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+            | grep -v '^#' | grep -v '^$' \
+            | paste -sd '|' -)
+
+          warnings=$(grep -E '^\* checking .* \.\.\. WARNING$' "$log" \
+            | sed -E 's/^\* checking (.*) \.\.\. WARNING$/\1/' || true)
+
+          if [ -n "$warnings" ]; then
+            echo "--- warnings reported ---"
+            printf '%s\n' "$warnings"
+            echo "--- allowed ---"
+            printf '%s\n' "$pattern"
+          fi
+
+          unexpected=$(printf '%s' "$warnings" | grep -Ev "^(${pattern})$" || true)
+
+          if [ -n "$unexpected" ]; then
+            echo >&2
+            echo "Unexpected R CMD check WARNING(s), not in allowed-warnings:" >&2
+            printf '%s\n' "$unexpected" >&2
+            echo >&2
+            sed -n '/WARNING$/,/^\* checking/p' "$log" >&2
+            exit 1
+          fi
+
+          echo "No warnings outside the allow-list."
 
       - uses: actions/upload-artifact@v4
         if: always()
