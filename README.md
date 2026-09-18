@@ -123,12 +123,92 @@ Optional inputs:
       timeout-minutes: 45                              # default
       env: |                                           # extra env for the check steps
         MYPKG_SLOW_TESTS=true
+      rust: false                                      # default; see below
+      rust-workspace: src/rust                         # default; ignored unless rust
+      allowed-warnings: |                              # default empty; see below
+        Rust compilation
 ```
 
 `containers` takes any name from <https://r-hub.github.io/containers/>.
 `ubuntu-next` and `ubuntu-release` are CRAN-like too, but sit closer to what
 the `runners` job already does. `build-args` reaches the `runners` job only:
 the container images carry no LaTeX and no vignette-compaction tooling.
+
+#### `rust: true` — R packages wrapping a Rust crate
+
+An R package whose `src/` holds a cargo crate needs three things no R
+package needs, and every one of them is the same three steps copied between
+repositories. `rust: true` does them: installs rustup's stable toolchain
+rather than whatever the image ships, caches the build against
+`rust-workspace` (`src/rust` by default, which is where the r-rust templates
+and the packages following them put the crate), and — the one that is easy
+to miss — adds the **windows-gnu target** on the Windows leg.
+
+```yaml
+jobs:
+  R-CMD-check:
+    uses: pedrobtz/r-actions/.github/workflows/r-cmd-check.yml@v1
+    with:
+      rust: true
+      allowed-warnings: |
+        Rust compilation
+```
+
+That Windows step is not a nicety. `rustup` on Windows defaults to an MSVC
+host, R links with Rtools' GNU toolchain, and an MSVC staticlib cannot be
+linked by Rtools. Without `rustup target add x86_64-pc-windows-gnu` the leg
+fails at link time with an error naming neither cargo nor the target, which
+is a bad afternoon for anyone meeting it for the first time.
+
+In the `containers` job the toolchain arrives through rustup's installer,
+because the r-hub images carry no cargo at all. The job is still worth
+running for such a package: the Rust is compiled by rustc either way, but
+the C shim that talks to R's API is compiled by the container's clang or
+gcc, and that shim is exactly where the PROTECT and unwind bugs live.
+
+#### `allowed-warnings` — one warning excused, the rest still fatal
+
+`error_on = "warning"` is this workflow's contract, and a package with a
+Rust crate cannot meet it. `tools:::.check_packages$check_rust()` greps the
+*install log* for `Downloading crates ...` and is not gated on `--as-cran`,
+so any package that resolves crates online — a development version with no
+published vendor archive, or one that sets `NOT_CRAN` — emits
+
+```
+* checking Rust compilation ... WARNING
+  Downloads Rust crates
+```
+
+on every leg, on every run. The usual repair is `error-on: '"error"'`, and
+it is a bad trade: it also stops the job failing on the compiler
+diagnostics that surface as the "significant warnings" WARNING, which are
+the single most common reason CRAN's pretest rejects a submission.
+
+`allowed-warnings` names the warnings you accept, one per line, matched
+against the name in `* checking <name> ... WARNING`. `error_on` drops to
+`"error"`, and a step after the check re-reads `00check.log` and fails on
+any warning that is *not* listed. Strictness moves rather than disappears —
+the same shape, and the same argument, as `rchk.yml`'s `baseline` and
+`valgrind.yml`'s `suppressions`.
+
+```yaml
+    with:
+      allowed-warnings: |
+        Rust compilation
+        compiled code
+```
+
+`compiled code` is the second entry a Rust package tends to need: Rust's
+panic runtime references `abort`, and `R CMD check` reports it as
+`Found '_abort', possibly from 'abort' (C)`. Removing it means dropping
+`catch_unwind`, which is the thing stopping a Rust panic unwinding across
+the C ABI — so it is excused rather than fixed.
+
+Unlike an rchk baseline entry, a listed warning that *stops* appearing does
+not fail the job. Check warnings are conditional on the flavor — a URL that
+resolves from one runner and times out from another, a condition that is a
+WARNING only under `--as-cran` — so a quiet entry is the normal case, not
+evidence of staleness.
 
 ### `coverage.yml` — Test coverage
 
@@ -494,6 +574,20 @@ crash. Runtime complement to the static `rchk` job.
 jobs:
   gctorture:
     uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@v1
+```
+
+`test_local()` loads the package with pkgload, which compiles `src/` — so a
+package wrapping a Rust crate needs `rust: true` here too, and `env` for
+anything its `configure` reads:
+
+```yaml
+jobs:
+  gctorture:
+    uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@v1
+    with:
+      rust: true
+      env: |
+        NOT_CRAN=true
 ```
 
 **Raise `step` before you raise the timeout.** Cost scales as roughly
