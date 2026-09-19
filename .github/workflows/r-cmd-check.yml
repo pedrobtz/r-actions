@@ -692,13 +692,28 @@ jobs:
       # declaring VignetteBuilder fails at build time, before the check this
       # job exists to perform has started. Nothing the caller passes can
       # avoid it, and no caller of this image wants vignettes built.
+      #
+      # --ignore-vignettes is the other half of that, and without it the job
+      # fails for the opposite reason. Not building the vignettes leaves the
+      # tarball with no inst/doc, and check then reports what it does not
+      # find:
+      #
+      #   * checking files in 'vignettes' ... WARNING
+      #     Files in the 'vignettes' directory but no files in 'inst/doc'
+      #   * checking package vignettes ... WARNING
+      #
+      # With error_on = "warning" that is fatal, so any package declaring
+      # VignetteBuilder fails this job however healthy it is -- the build
+      # flag alone moves the failure rather than removing it. Checking
+      # vignettes that were deliberately not built is not a question this
+      # image can answer, so it is not asked.
       - name: Run R CMD check
         shell: Rscript {0}
         env:
           _R_CHECK_FORCE_SUGGESTS_: "false"
         run: |
           rcmdcheck::rcmdcheck(
-            args = ${{ inputs.args }},
+            args = c(${{ inputs.args }}, "--ignore-vignettes"),
             build_args = c("--no-manual", "--no-build-vignettes"),
             error_on = ${{ inputs.allowed-warnings == '' && '"warning"' || '"error"' }},
             check_dir = "check"

@@ -73,6 +73,35 @@ on:
         type: string
         required: false
         default: ""
+      gcc-ubsan-flags:
+        description: >
+          The GCC counterpart to `extra-ubsan-checks`: flags appended to the
+          sanitizer build on `asan` containers whose compiler is GCC. Empty
+          by default. Spellings are GCC's, and nothing here is applied to a
+          clang container.
+
+          The input above only adds checks, because clang's extra groups are
+          all opt-in. This one exists because on GCC the interesting case is
+          the other direction. The `gcc-asan` image compiles packages with
+          `-fsanitize=address,undefined,bounds-strict` from its own Makeconf,
+          and `bounds-strict` is outside the `undefined` group that CRAN
+          runs. What it adds is instrumentation of flexible array members and
+          the `T data[0]` idiom that precedes them -- which every
+          MiniSat-derived solver, and a good deal of vendored C, is built on.
+
+          So a package can fail this job on a construct CRAN's own UBSan
+          never looks at, with no way to say so: `extra-ubsan-checks` is
+          skipped on GCC by design, and the image's flags are not the
+          caller's to set. `-fno-sanitize=bounds-strict` here restores the
+          `undefined` group, which is the flavor that can actually reject a
+          submission.
+
+          Use it for that, not to quiet a finding that reproduces under
+          plain `-fsanitize=undefined`. Those are real, and the job is doing
+          its job.
+        type: string
+        required: false
+        default: ""
       ubsan-suppressions:
         description: >
           Path to a UBSan suppressions file, relative to the repository root.
@@ -451,6 +480,37 @@ jobs:
           {
             printf 'CFLAGS += %s\n' "$EXTRA_CHECKS"
             printf 'CXXFLAGS += %s\n' "$EXTRA_CHECKS"
+          } >> "$target"
+          echo "--- appended to ${target} ---"
+          cat "$target"
+
+      # The GCC counterpart, and the mirror image of the step above: that one
+      # is skipped unless the compiler is clang, this one unless it is not.
+      # Appended with `+=` for the same reason -- the image configures its
+      # own toolchain through this file, and `=` would replace it.
+      #
+      # Order matters and is why this appends rather than rewrites: the
+      # image's -fsanitize=... comes from Makeconf, these flags land after
+      # it, and a later -fno-sanitize= is what switches one back off.
+      - name: Add the GCC UBSan flags
+        if: inputs.gcc-ubsan-flags != ''
+        env:
+          GCC_FLAGS: ${{ inputs.gcc-ubsan-flags }}
+        run: |
+          set -eu
+          cc="$(R CMD config CC || true)"
+          case "$cc" in
+            *clang*)
+              echo "::notice::gcc-ubsan-flags skipped on ${{ matrix.container }}:" \
+                   "its compiler is '${cc}', and these are GCC spellings"
+              exit 0
+              ;;
+          esac
+          target="${R_MAKEVARS_USER:-${HOME}/.R/Makevars}"
+          mkdir -p "$(dirname "$target")"
+          {
+            printf 'CFLAGS += %s\n' "$GCC_FLAGS"
+            printf 'CXXFLAGS += %s\n' "$GCC_FLAGS"
           } >> "$target"
           echo "--- appended to ${target} ---"
           cat "$target"
