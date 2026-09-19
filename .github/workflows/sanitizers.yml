@@ -203,7 +203,15 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang
+          # libomp-dev is not optional for an OpenMP package. R's Makeconf
+          # puts -fopenmp in SHLIB_OPENMP_CFLAGS whatever the compiler, and
+          # this job overrides CC to clang -- which, unlike gcc with its
+          # bundled libgomp, needs libomp installed separately. Without it a
+          # package whose src/Makevars forwards SHLIB_OPENMP_CFLAGS fails to
+          # build before UBSan observes anything: first `omp.h file not
+          # found`, then `cannot find -lomp` at link. The asan job below does
+          # not need this because its r-hub containers already ship it.
+          sudo apt-get install -y clang libomp-dev
 
       - uses: r-lib/actions/setup-r@v2
         with:
