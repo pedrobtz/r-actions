@@ -254,16 +254,33 @@ jobs:
             echo "CXX = clang++"
             echo "CFLAGS = ${BASE} ${EXTRA_CHECKS}"
             echo "CXXFLAGS = ${BASE} ${EXTRA_CHECKS}"
-            # A package declaring CXX_STD = CXX20 (or 11, 14, 17) is compiled
-            # with $(CXX20) and $(CXX20FLAGS), not $(CXX)/$(CXXFLAGS). Setting
-            # only the latter leaves such a package compiled by the image's
-            # g++ with no instrumentation, and then linked with the clang-only
-            # LDFLAGS below -- the same "passes without checking anything"
-            # failure the comment above describes, one variable over.
-            # CXXnnSTD is left alone: Makeconf's -std=gnu++nn suits clang++.
-            for std in 11 14 17 20; do
+            # A package declaring CXX_STD is compiled with $(CXXnn) and
+            # $(CXXnnFLAGS), not $(CXX)/$(CXXFLAGS). Setting only the latter
+            # leaves such a package compiled by the image's g++ with no
+            # instrumentation, and then linked with the clang-only LDFLAGS
+            # below -- the same "passes without checking anything" failure the
+            # comment above describes, one variable over.
+            #
+            # Only the standards this R actually defines are overridden: R
+            # reports C++ support through these variables, so declaring
+            # CXX26 = clang++ where R ships it empty would claim a standard
+            # the toolchain may not have.
+            #
+            # CXXnnSTD is deliberately left alone. Makeconf's -std=gnu++nn
+            # suits clang++, and a zusmt trial run confirmed it: the compile
+            # line came out as
+            #   clang++ -std=gnu++20 ... -fsanitize=undefined -c init.cc
+            # with the standard coming from the untouched CXX20STD.
+            for std in 11 14 17 20 23 26; do
+              [ -n "$(R CMD config CXX${std} 2>/dev/null || true)" ] || continue
               echo "CXX${std} = clang++"
               echo "CXX${std}FLAGS = ${BASE} ${EXTRA_CHECKS}"
+            done
+            # C has no per-standard compiler variable -- it always uses
+            # $(CC), set above -- but it does have per-standard flags, and a
+            # package declaring C_STD would otherwise compile uninstrumented.
+            for std in 90 99 17 23; do
+              echo "C${std}FLAGS = ${BASE} ${EXTRA_CHECKS}"
             done
             echo "LDFLAGS = -fsanitize=undefined -shared-libsan -Wl,-rpath,${RTLIB}"
           } >> ~/.R/Makevars
