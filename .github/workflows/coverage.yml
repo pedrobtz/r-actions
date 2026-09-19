@@ -299,6 +299,20 @@ jobs:
           {
             echo "CFLAGS += -O0 -g --coverage"
             echo "CXXFLAGS += -O0 -g --coverage"
+            # A package declaring C_STD or CXX_STD does not compile through
+            # $(CFLAGS)/$(CXXFLAGS) at all: R uses the standard-specific
+            # variable, $(C17FLAGS) or $(CXX20FLAGS) and friends. Appending
+            # only to the two above leaves such a package built with no
+            # --coverage -- no .gcno is written, no .gcda follows, and the
+            # job reports empty coverage as a success, which is the worst
+            # shape for this to fail in. Appending to a variable R does not
+            # define is harmless, so the list does not need narrowing.
+            for std in 90 99 17 23; do
+              echo "C${std}FLAGS += -O0 -g --coverage"
+            done
+            for std in 11 14 17 20 23 26; do
+              echo "CXX${std}FLAGS += -O0 -g --coverage"
+            done
             echo "LDFLAGS += --coverage"
           } >> "$target"
           cat "$target"
