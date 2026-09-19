@@ -475,14 +475,42 @@ jobs:
               exit 0
               ;;
           esac
-          target="${R_MAKEVARS_USER:-${HOME}/.R/Makevars}"
-          mkdir -p "$(dirname "$target")"
-          {
-            printf 'CFLAGS += %s\n' "$EXTRA_CHECKS"
-            printf 'CXXFLAGS += %s\n' "$EXTRA_CHECKS"
-          } >> "$target"
-          echo "--- appended to ${target} ---"
-          cat "$target"
+          # CXXFLAGS alone does not reach a package that declares a C++
+          # standard. R compiles such a package with $(CXXnn) and
+          # $(CXXnnFLAGS), so flags appended to CXXFLAGS never appear on the
+          # command line -- silently, with the job still green if the checks
+          # were meant to add something and still red if they were meant to
+          # switch something off. The runner job's Makevars step already
+          # covers every standard for this reason; this is the container
+          # equivalent.
+          #
+          # Appended, never assigned: the image's own -fsanitize= flags live
+          # in these variables, and `=` would discard them.
+          append_all() {
+            target="$1"
+            flags="$2"
+            mkdir -p "$(dirname "$target")"
+            {
+              printf 'CFLAGS += %s\n' "$flags"
+              printf 'CXXFLAGS += %s\n' "$flags"
+              # Only the standards this R actually defines, so nothing here
+              # claims a standard the toolchain does not have.
+              for std in 11 14 17 20 23 26; do
+                [ -n "$(R CMD config "CXX${std}" 2>/dev/null || true)" ] || continue
+                printf 'CXX%sFLAGS += %s\n' "$std" "$flags"
+              done
+              # C has no per-standard compiler variable, but it does have
+              # per-standard flags, and a package declaring C_STD would
+              # otherwise compile without these.
+              for std in 90 99 17 23; do
+                printf 'C%sFLAGS += %s\n' "$std" "$flags"
+              done
+            } >> "$target"
+            echo "--- appended to ${target} ---"
+            cat "$target"
+          }
+
+          append_all "${R_MAKEVARS_USER:-${HOME}/.R/Makevars}" "$EXTRA_CHECKS"
 
       # The GCC counterpart, and the mirror image of the step above: that one
       # is skipped unless the compiler is clang, this one unless it is not.
@@ -506,14 +534,42 @@ jobs:
               exit 0
               ;;
           esac
-          target="${R_MAKEVARS_USER:-${HOME}/.R/Makevars}"
-          mkdir -p "$(dirname "$target")"
-          {
-            printf 'CFLAGS += %s\n' "$GCC_FLAGS"
-            printf 'CXXFLAGS += %s\n' "$GCC_FLAGS"
-          } >> "$target"
-          echo "--- appended to ${target} ---"
-          cat "$target"
+          # CXXFLAGS alone does not reach a package that declares a C++
+          # standard. R compiles such a package with $(CXXnn) and
+          # $(CXXnnFLAGS), so flags appended to CXXFLAGS never appear on the
+          # command line -- silently, with the job still green if the checks
+          # were meant to add something and still red if they were meant to
+          # switch something off. The runner job's Makevars step already
+          # covers every standard for this reason; this is the container
+          # equivalent.
+          #
+          # Appended, never assigned: the image's own -fsanitize= flags live
+          # in these variables, and `=` would discard them.
+          append_all() {
+            target="$1"
+            flags="$2"
+            mkdir -p "$(dirname "$target")"
+            {
+              printf 'CFLAGS += %s\n' "$flags"
+              printf 'CXXFLAGS += %s\n' "$flags"
+              # Only the standards this R actually defines, so nothing here
+              # claims a standard the toolchain does not have.
+              for std in 11 14 17 20 23 26; do
+                [ -n "$(R CMD config "CXX${std}" 2>/dev/null || true)" ] || continue
+                printf 'CXX%sFLAGS += %s\n' "$std" "$flags"
+              done
+              # C has no per-standard compiler variable, but it does have
+              # per-standard flags, and a package declaring C_STD would
+              # otherwise compile without these.
+              for std in 90 99 17 23; do
+                printf 'C%sFLAGS += %s\n' "$std" "$flags"
+              done
+            } >> "$target"
+            echo "--- appended to ${target} ---"
+            cat "$target"
+          }
+
+          append_all "${R_MAKEVARS_USER:-${HOME}/.R/Makevars}" "$GCC_FLAGS"
 
       # The same check the runner job makes, for the same reason: a
       # suppressions path the runtime cannot read aborts whatever process was
