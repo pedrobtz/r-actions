@@ -56,7 +56,17 @@ on:
 
 name: vendor
 
-permissions: read-all
+# Nothing here writes through the token, so `contents: read` is enough: the
+# job reads the checkout, and artifact upload, the cache and a public ghcr.io
+# image each need no declared scope.
+#
+# This is not only least privilege. `read-all` is wider than the `read` that a
+# repository hands its GITHUB_TOKEN by default, and a called workflow cannot
+# be granted more than its caller holds -- so requesting it here made every
+# caller that did not declare permissions of its own fail with an unannotated
+# `startup_failure`, two seconds in, before any job was created.
+permissions:
+  contents: read
 
 jobs:
   vendor:

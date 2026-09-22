@@ -10,15 +10,23 @@ on:
         default: 60
       valgrind-opts:
         description: >
-          Extra valgrind options, delivered through VALGRIND_OPTS so they reach
-          the valgrind that `R CMD check --use-valgrind` starts. R's own
-          invocation does not set --leak-check=full, so a "definitely lost"
-          finding arrives as a total with no stack and cannot be attributed
-          from the artifact; pass "--leak-check=full --track-origins=yes" to
-          get the stacks.
+          Valgrind options, delivered through VALGRIND_OPTS so they reach the
+          valgrind that `R CMD check --use-valgrind` starts.
+
+          The default turns on full leak checking, because R's own invocation
+          does not. Without it a "definitely lost" finding arrives as a total
+          with no stack -- "48 bytes in 1 blocks" and a note to rerun with
+          --leak-check=full -- so the run that fails cannot say what leaked,
+          and attributing it costs a second run of a job that already takes
+          tens of minutes. A check that fails should explain itself on the
+          run that fails.
+
+          Setting this replaces the default rather than adding to it, so keep
+          --leak-check=full when passing extra options. Pass a single space to
+          turn it off.
         type: string
         required: false
-        default: ""
+        default: "--leak-check=full --track-origins=yes --num-callers=30"
       suppressions:
         description: >
           Path to a valgrind suppression file, relative to the repository root.
@@ -43,7 +51,17 @@ on:
 
 name: valgrind
 
-permissions: read-all
+# Nothing here writes through the token, so `contents: read` is enough: the
+# job reads the checkout, and artifact upload, the cache and a public ghcr.io
+# image each need no declared scope.
+#
+# This is not only least privilege. `read-all` is wider than the `read` that a
+# repository hands its GITHUB_TOKEN by default, and a called workflow cannot
+# be granted more than its caller holds -- so requesting it here made every
+# caller that did not declare permissions of its own fail with an unannotated
+# `startup_failure`, two seconds in, before any job was created.
+permissions:
+  contents: read
 
 jobs:
   valgrind:
