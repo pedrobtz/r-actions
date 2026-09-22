@@ -221,19 +221,61 @@ jobs:
 
           cat .github/badges/coverage.svg
 
+      # A bare `git push` loses a race that is entirely ordinary: merge two
+      # pull requests within a minute of each other and both runs reach this
+      # step, the second one rejected with "fetch first". Nothing is wrong
+      # with the code, but the run goes red on the default branch, which is
+      # where a red run is least welcome and most likely to be ignored.
+      #
+      # Retried by rebuilding rather than rebasing. The badge is a generated
+      # file with a single writer, so the meaningful state is the rendered
+      # SVG, not the commit carrying it: on a rejected push, discard the
+      # commit, move to whatever the branch now points at, write the badge
+      # again and commit again. That has no conflict to resolve, which a
+      # rebase of a one-file commit onto a different version of that same
+      # file would.
+      #
+      # Last writer wins, which is right for a badge -- the value it should
+      # show is the one from the most recently finished run. If the other
+      # run already wrote the same percentage there is nothing staged the
+      # second time around, and the step succeeds without a commit.
       - name: Commit coverage badge
         env:
           PCT: ${{ needs.coverage.outputs.pct }}
         run: |
+          set -eu
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/badges/coverage.svg
-          if git diff --staged --quiet; then
-            echo "Coverage badge unchanged (${PCT}%)."
-          else
+
+          badge=.github/badges/coverage.svg
+          rendered="$(mktemp)"
+          cp "$badge" "$rendered"
+
+          for attempt in 1 2 3 4 5; do
+            mkdir -p "$(dirname "$badge")"
+            cp "$rendered" "$badge"
+            git add "$badge"
+
+            if git diff --staged --quiet; then
+              echo "Coverage badge unchanged (${PCT}%)."
+              exit 0
+            fi
+
             git commit -m "Update coverage badge (${PCT}%)"
-            git push
-          fi
+
+            if git push; then
+              exit 0
+            fi
+
+            echo "Push rejected on attempt ${attempt}: ${GITHUB_REF_NAME} moved" \
+                 "while this run was working. Rebuilding on the new tip."
+            git fetch origin "${GITHUB_REF_NAME}"
+            git reset --hard "origin/${GITHUB_REF_NAME}"
+          done
+
+          echo "::error::could not push the coverage badge after 5 attempts"
+          exit 1
 
   # Line and branch coverage of the C, which is a different question from
   # the one covr answers.
