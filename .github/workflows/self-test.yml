@@ -1,0 +1,55 @@
+# Everything else here is `workflow_call` only, so until now a pull request to
+# this repository ran nothing at all. Both of the last two defects were found
+# by a consuming package instead, long after release:
+#
+#   * every workflow asked for `permissions: read-all`, which rejects any
+#     caller that does not declare permissions of its own, and disabled a
+#     package's native checks for three months without ever reporting a
+#     failure;
+#   * `v1` stopped being moved and fell fourteen commits and four releases
+#     behind main, so consumers pinned to it -- as the README tells them to
+#     be -- received none of those releases.
+#
+# Neither needs an R package to detect, which matters: the reusable workflows
+# check out the *caller's* repository and expect one, so calling them from
+# here would fail for the wrong reason and prove nothing.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+name: self-test
+
+permissions:
+  contents: read
+
+jobs:
+  workflows:
+    name: workflow invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A virtualenv rather than `pip install`, because the runner's system
+      # Python is externally managed and refuses to install into itself.
+      - name: Check permissions are explicit and least-privilege
+        run: |
+          python3 -m venv /tmp/lint
+          /tmp/lint/bin/pip install --quiet pyyaml
+          /tmp/lint/bin/python tests/lint-workflows.py
+
+  major-tag:
+    name: v1 tracks the newest release
+    # Tags do not move on a pull request, so this would only ever report the
+    # state of main -- and fail every open pull request between a merge and
+    # the tag that follows it.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the major tag is not stale
+        run: bash tests/check-major-tag.sh v1
