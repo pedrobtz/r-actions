@@ -245,6 +245,44 @@ To display the badge in your README, add the following line (replacing
 ![Coverage]({owner}/{repo}/raw/main/.github/badges/coverage.svg)
 ```
 
+#### `badge-branch` — when the default branch takes no direct pushes
+
+A ruleset that requires pull requests on the default branch rejects the badge
+commit ("Changes must be made through a pull request"), so the `badge` job
+fails after its retries on every push and the badge freezes at its last value.
+`badge-branch` sends the commit somewhere else. For a package with a pkgdown
+site that is gh-pages: it already takes bot pushes, and a default-branch
+ruleset does not cover it.
+
+```yaml
+jobs:
+  coverage:
+    uses: pedrobtz/r-actions/.github/workflows/coverage.yml@v1
+    permissions:
+      contents: write
+    with:
+      badge-branch: gh-pages
+      badge-path: badges/coverage.svg
+```
+
+and point the README at that branch:
+
+```markdown
+![Coverage](https://raw.githubusercontent.com/{owner}/{repo}/gh-pages/badges/coverage.svg)
+```
+
+**The pkgdown deploy must not force-push.** JamesIves'
+github-pages-deploy-action does by default, and with both workflows running on
+every push to main, a badge commit that lands between the deploy's checkout
+and its push is overwritten without a trace. Set `force: false` on the deploy
+step so it rebases instead; the badge job already retries when the deploy wins
+the race. Keep `clean: false`, or list `badges` under `clean-exclude`, so a
+deploy does not delete the badge as a file pkgdown did not generate.
+
+The branch must already exist. The caller's `paths-ignore` filter is no longer
+needed either, since nothing is committed to the branch that triggered the
+run.
+
 #### `native: true` — coverage of the C, separately
 
 covr measures R code. For a package that is mostly a C parser behind a thin R
