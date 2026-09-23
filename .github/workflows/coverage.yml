@@ -43,6 +43,37 @@ on:
         type: string
         required: false
         default: ""
+      badge-branch:
+        description: >
+          Branch the `badge` job commits the SVG to. Empty, the default,
+          commits to the branch that triggered the run.
+
+          Set it when that branch takes no direct pushes. A ruleset requiring
+          pull requests on the default branch rejects the badge commit --
+          "Changes must be made through a pull request" -- so the job fails
+          after its retries on every push, and the badge freezes at its last
+          value. gh-pages is the natural target for a package with a pkgdown
+          site: it already takes bot pushes, and a default-branch ruleset
+          does not cover it.
+
+          The branch must exist. If a pkgdown deploy writes to the same
+          branch, it must not force-push: JamesIves'
+          github-pages-deploy-action does by default, and a badge commit
+          landing between its checkout and its push is silently overwritten.
+          Set `force: false` there, and keep `clean: false` or list the badge
+          under `clean-exclude`.
+        type: string
+        required: false
+        default: ""
+      badge-path:
+        description: >
+          Path of the SVG on the badge branch. The default suits a badge
+          committed next to the source; on a separate branch such as
+          gh-pages, a path outside .github reads better, e.g.
+          badges/coverage.svg.
+        type: string
+        required: false
+        default: .github/badges/coverage.svg
 
 name: coverage
 
@@ -135,7 +166,11 @@ jobs:
       contents: write
 
     steps:
+      # An empty `ref` is checkout's own default, the triggering ref, so a
+      # caller that sets no badge-branch gets exactly what it got before.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.badge-branch }}
 
       # Rendered here rather than fetched.
       #
@@ -175,9 +210,10 @@ jobs:
         env:
           PCT: ${{ needs.coverage.outputs.pct }}
           COLOR: ${{ needs.coverage.outputs.color }}
+          BADGE: ${{ inputs.badge-path }}
         run: |
           set -eu
-          mkdir -p .github/badges
+          mkdir -p "$(dirname "$BADGE")"
 
           subject="covr"
           status="${PCT}%"
@@ -197,7 +233,7 @@ jobs:
           # one number here that is not an integer.
           width=$(printf '%d.%d' $(( total / 10 )) $(( total % 10 )))
 
-          cat > .github/badges/coverage.svg <<EOF
+          cat > "$BADGE" <<EOF
           <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="20" viewBox="0 0 ${total} 200" role="img" aria-label="${subject}: ${status}">
           <title>${subject}: ${status}</title>
           <linearGradient id="gradient" x2="0" y2="100%">
@@ -219,7 +255,7 @@ jobs:
           </svg>
           EOF
 
-          cat .github/badges/coverage.svg
+          cat "$BADGE"
 
       # A bare `git push` loses a race that is entirely ordinary: merge two
       # pull requests within a minute of each other and both runs reach this
@@ -239,16 +275,23 @@ jobs:
       # show is the one from the most recently finished run. If the other
       # run already wrote the same percentage there is nothing staged the
       # second time around, and the step succeeds without a commit.
+      #
+      # The push names its target rather than relying on a bare `git push`,
+      # because with badge-branch set the checkout is not the triggering
+      # branch; without it, the target is the triggering branch as before.
       - name: Commit coverage badge
         env:
           PCT: ${{ needs.coverage.outputs.pct }}
+          BADGE: ${{ inputs.badge-path }}
+          BADGE_BRANCH: ${{ inputs.badge-branch }}
         run: |
           set -eu
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          badge=.github/badges/coverage.svg
+          badge="$BADGE"
+          branch="${BADGE_BRANCH:-$GITHUB_REF_NAME}"
           rendered="$(mktemp)"
           cp "$badge" "$rendered"
 
@@ -264,14 +307,14 @@ jobs:
 
             git commit -m "Update coverage badge (${PCT}%)"
 
-            if git push; then
+            if git push origin "HEAD:${branch}"; then
               exit 0
             fi
 
-            echo "Push rejected on attempt ${attempt}: ${GITHUB_REF_NAME} moved" \
+            echo "Push rejected on attempt ${attempt}: ${branch} moved" \
                  "while this run was working. Rebuilding on the new tip."
-            git fetch origin "${GITHUB_REF_NAME}"
-            git reset --hard "origin/${GITHUB_REF_NAME}"
+            git fetch origin "${branch}"
+            git reset --hard "origin/${branch}"
           done
 
           echo "::error::could not push the coverage badge after 5 attempts"
