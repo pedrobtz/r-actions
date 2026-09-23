@@ -539,11 +539,23 @@ jobs:
       # macOS and Windows legs above build it. Note that a caller who
       # overrides `args` without keeping --no-manual will hit the same wall
       # from the check side.
+      #
+      # _R_CHECK_CRAN_INCOMING_ defaults to false, as check-r-package sets it
+      # on the `runners` job, so that every leg asks the same question. Under
+      # --as-cran the incoming check compares the package's version with
+      # CRAN's and warns "Insufficient package version" when they are equal,
+      # which for a package already on CRAN is every commit between a release
+      # and the next version bump. With error_on = "warning" that failed only
+      # the container legs, on release bookkeeping rather than on anything
+      # the compiler said. The same line guards every other direct rcmdcheck
+      # call here -- nosuggests, nold, lto, sanitizers, valgrind. A caller
+      # who wants the check sets _R_CHECK_CRAN_INCOMING_=true through `env`.
       - name: Run R CMD check
         shell: Rscript {0}
         env:
           _R_CHECK_FORCE_SUGGESTS_: "false"
         run: |
+          if (Sys.getenv("_R_CHECK_CRAN_INCOMING_", "") == "") Sys.setenv("_R_CHECK_CRAN_INCOMING_" = "false")
           rcmdcheck::rcmdcheck(
             args = ${{ inputs.args }},
             build_args = c("--no-manual"),
@@ -722,6 +734,7 @@ jobs:
         env:
           _R_CHECK_FORCE_SUGGESTS_: "false"
         run: |
+          if (Sys.getenv("_R_CHECK_CRAN_INCOMING_", "") == "") Sys.setenv("_R_CHECK_CRAN_INCOMING_" = "false")
           rcmdcheck::rcmdcheck(
             args = c(${{ inputs.args }}, "--ignore-vignettes"),
             build_args = c("--no-manual", "--no-build-vignettes"),
@@ -870,6 +883,7 @@ jobs:
         env:
           _R_CHECK_FORCE_SUGGESTS_: "false"
         run: |
+          if (Sys.getenv("_R_CHECK_CRAN_INCOMING_", "") == "") Sys.setenv("_R_CHECK_CRAN_INCOMING_" = "false")
           rcmdcheck::rcmdcheck(
             args = ${{ inputs.args }},
             build_args = c("--no-manual"),

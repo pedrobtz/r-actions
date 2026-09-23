@@ -396,6 +396,7 @@ jobs:
       - name: Run R CMD check with sanitizers
         shell: Rscript {0}
         run: |
+          if (Sys.getenv("_R_CHECK_CRAN_INCOMING_", "") == "") Sys.setenv("_R_CHECK_CRAN_INCOMING_" = "false")
           rcmdcheck::rcmdcheck(
             args = c("--no-manual", "--as-cran"),
             build_args = c("--no-manual"),

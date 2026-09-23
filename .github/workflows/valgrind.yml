@@ -112,6 +112,7 @@ jobs:
                 && format('--suppressions={0}/{1}', github.workspace, inputs.suppressions)
                 || '' }}
         run: |
+          if (Sys.getenv("_R_CHECK_CRAN_INCOMING_", "") == "") Sys.setenv("_R_CHECK_CRAN_INCOMING_" = "false")
           rcmdcheck::rcmdcheck(
             args = c("--no-manual", "--as-cran", "--use-valgrind"),
             build_args = c("--no-manual"),
