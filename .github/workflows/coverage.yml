@@ -123,11 +123,21 @@ jobs:
         run: |
           cov <- covr::package_coverage(quiet = FALSE)
           pct <- covr::percent_coverage(cov)
+          # A package with nothing to cover -- a fresh skeleton whose only R
+          # file is the "_PACKAGE" stub -- gives NaN here, and NaN in `if` is
+          # an error that failed every coverage run of a new package until
+          # its first function landed. Nothing is broken in that package, so
+          # report 0% under badgen's grey rather than fail the job. The badge
+          # renderer expects digits, a point and a percent sign, which 0.0
+          # still is.
+          empty <- !is.finite(pct)
+          if (empty) pct <- 0
           # Emitted as hex rather than as a colour name, because the renderer
           # downstream is now a template in this repository and not a tool
           # with a colour vocabulary. These are badgen's own values, so the
           # badge does not change appearance on the commit that removed it.
           color <-
+            if (empty) "#999" else
             if (pct >= 90) "#3C1" else
             if (pct >= 75) "#DB1" else
             if (pct >= 60) "#F73" else "#E43"
@@ -147,7 +157,8 @@ jobs:
           md <- c(
             "## Coverage",
             "",
-            sprintf("**Overall: %.1f%%**", pct),
+            if (empty) "**Overall: no expressions to cover**" else
+              sprintf("**Overall: %.1f%%**", pct),
             "",
             "| File | Expressions | Covered | Coverage |",
             "|:-----|------------:|--------:|---------:|",
