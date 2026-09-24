@@ -65,6 +65,22 @@ for path in sorted(WORKFLOWS.glob("*.yml")):
         fail(name, "declares no jobs")
         continue
 
+    # Cancelling superseded runs belongs to the caller. In a called workflow
+    # `github.workflow` and `github.ref` are the caller's, so the usual group
+    # expression here names the caller's own group -- which GitHub cancels as
+    # a deadlock -- and the group of every sibling call in the same file, so
+    # native-checks' six calls would cancel one another.
+    # PyYAML reads the bare key `on` as the boolean True.
+    triggers = doc.get("on", doc.get(True))
+    if isinstance(triggers, dict) and "workflow_call" in triggers:
+        where = ["the workflow"] if "concurrency" in doc else []
+        where += [f"job `{j}`" for j, body in doc["jobs"].items()
+                  if isinstance(body, dict) and "concurrency" in body]
+        if where:
+            fail(name, f"declares `concurrency` on {', '.join(where)}; a "
+                       f"reusable workflow shares the caller's group names, "
+                       f"so put it in the caller")
+
     perms = permissions_of(doc)
 
     # A reusable workflow cannot be granted more than its caller holds, and a
@@ -103,4 +119,4 @@ if failures:
     sys.exit(1)
 
 count = len(list(WORKFLOWS.glob("*.yml")))
-print(f"{count} workflows: permissions are explicit, least-privilege and match WRITERS.")
+print(f"{count} workflows: permissions are explicit, least-privilege and match WRITERS; no reusable workflow declares concurrency.")

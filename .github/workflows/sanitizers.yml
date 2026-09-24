@@ -141,6 +141,18 @@ on:
         type: boolean
         required: false
         default: false
+      profile:
+        description: >
+          `quick` skips the `asan` job, leaving UBSan on the runner. Anything
+          else, including the default `full`, runs both. The same input, with
+          the same meaning, as r-cmd-check.yml's.
+
+          UBSan stays because it is one ordinary runner and a few minutes.
+          The asan job is two more containers, and heap errors are left to
+          the full run, where valgrind.yml looks for them as well.
+        type: string
+        required: false
+        default: full
       asan-containers:
         description: >
           JSON array of R-hub container names for the `asan` job. Names come
@@ -423,7 +435,7 @@ jobs:
   # configured, a sanitizer finds nothing and says so in a way that reads
   # exactly like success.
   asan:
-    if: inputs.asan
+    if: inputs.asan && inputs.profile != 'quick'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
