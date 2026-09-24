@@ -127,6 +127,9 @@ Optional inputs:
       rust-workspace: src/rust                         # default; ignored unless rust
       allowed-warnings: |                              # default empty; see below
         Rust compilation
+      profile: full                                    # default; see Usage
+      quick-runners: '[{"os": "ubuntu-latest", "r": "release"}]'  # default
+      quick-containers: '["clang23"]'                  # default
 ```
 
 `containers` takes any name from <https://r-hub.github.io/containers/>.
@@ -454,6 +457,8 @@ jobs:
       asan-run: Rscript tools/sanitizer-exercise.R
 ```
 
+`profile: quick` skips this job and keeps UBSan; see [Quick on pull requests, full after merge](#quick-on-pull-requests-full-after-merge).
+
 `asan-run` replaces `R CMD check` with a command of your own. The default path
 is fine for most packages — measured at about two minutes on a package with
 five Suggests, which pak resolved as binaries from the image's own repository
@@ -573,7 +578,8 @@ project that publishes advisories elsewhere will show none here.
 
 Runs `R CMD check --use-valgrind` under R-release, then **scans the check
 output and fails on a finding**. Catches heap errors and memory leaks, and is
-the check CRAN runs on their valgrind machine. Slower than the sanitizers job.
+the check CRAN runs on their valgrind machine. Slower than the sanitizers job,
+and skipped under `profile: quick`; see [Quick on pull requests, full after merge](#quick-on-pull-requests-full-after-merge).
 
 ```yaml
 jobs:
@@ -648,6 +654,10 @@ runs, and a suite of any size still forces many thousands of collections. An
 unprotected `SEXP` is caught when a collection lands while it is live, so a
 larger step widens the window it can hide in. Prefer 100 over not running this
 job at all.
+
+Or keep 20 and pay for it once per merge rather than on every push.
+`profile: quick` runs at `quick-step` (500 by default) instead of `step`, so a
+pull request gets the wide step and main the sensitive one; see [Quick on pull requests, full after merge](#quick-on-pull-requests-full-after-merge).
 
 Most of that cost is not your package. `expect_*()` allocates heavily —
 comparison, condition objects, srcrefs — so on the measurement above, 40 raw
@@ -945,6 +955,73 @@ rather than dropped.
 
 ## Usage
 
+### Quick on pull requests, full after merge
+
+Run everything on every push to a pull request and one job decides how long
+you wait: gctorture at step 20. On one package it took 36 minutes of a
+36-minute run, where the next slowest job took under seven. The full set then
+ran again on the push to main after merge, largely against the tree the pull
+request had already checked — a pull request run checks the merge with its
+base, not the branch alone. Across three packages that second run was 28 to
+39% of the runner time their pushes and pull requests used.
+
+`profile` splits the two. Four workflows take `profile: quick` and do less:
+
+| Workflow | `quick` | `full` (the default) |
+|---|---|---|
+| `r-cmd-check.yml` | `quick-runners` (Ubuntu, R-release) and `quick-containers` (`clang23`); no `nosuggests` or `nold` | `runners`, `containers`, and `nosuggests` and `nold` when on |
+| `gctorture.yml` | `quick-step` (500) | `step` (20) |
+| `sanitizers.yml` | UBSan only | UBSan, and the `asan` job when on |
+| `valgrind.yml` | skipped | runs |
+
+The caller picks the profile. Nothing here reads the event for itself, and a
+caller that passes nothing gets the workflow it had before this input
+existed. The examples pass:
+
+```yaml
+    with:
+      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
+```
+
+Quick on each push to a pull request, full on the push to main. A pull
+request that touches something the quick set cannot see — a Windows-only code
+path, a Suggests guard — takes the `full-ci` label and runs in full while the
+label stays on. The examples list `labeled` among the `pull_request` types so
+that adding it starts that run. Any label starts a run, and the concurrency
+group below cancels the one it replaces.
+
+The cost, stated rather than hidden: a failure only the full set catches is
+found on main after merge, not on the pull request before it. The usual
+answer to that is a merge queue, which runs the full set on the would-be merge
+commit and merges only if it passes, but merge queues need a repository owned
+by an organization; on a personal account `merge_group` never fires. Where one
+is available, add `merge_group:` to the triggers and the same expression makes
+that run full.
+
+Anything other than `quick` runs full, so a typo costs minutes rather than
+coverage.
+
+#### Cancel what a new push supersedes
+
+The examples also cancel a pull request's run when a new push replaces it:
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+```
+
+`github.run_id` gives every push to main a group of its own, so nothing on
+main is cancelled or left pending behind another run. With `github.ref` in
+its place, a second merge landing while the first was still being checked
+would cancel that check, and the first merge would never finish one.
+
+This belongs in the caller and never in the reusable workflows. Inside a
+called workflow `github.workflow` and `github.ref` are the *caller's*, so a
+group written there names the caller's own group — which GitHub cancels as a
+deadlock — and the group of every sibling call in the same file.
+`tests/lint-workflows.py` fails on a reusable workflow that declares one.
+
 ### R CMD check
 
 Copy [`examples/r-cmd-check.yml`](examples/r-cmd-check.yml) into your package
@@ -954,15 +1031,27 @@ as `.github/workflows/R-CMD-check.yml`, replacing the r-lib/actions template:
 on:
   push:
     branches: [main, master]
+  # `labeled` so that adding `full-ci` to a pull request reruns it in full.
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
 
 name: R-CMD-check
 
 permissions: read-all
 
+# A new push to a pull request cancels the run it supersedes. Pushes to main
+# get a group of their own, so every merge is checked and none is cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   R-CMD-check:
     uses: pedrobtz/r-actions/.github/workflows/r-cmd-check.yml@v1
+    with:
+      # Quick on each push to a pull request, full after merge. The
+      # `full-ci` label runs the full set on a pull request before merging.
+      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
 ```
 
 Keep the file name your badge already points at — the workflow's own `name:`
@@ -983,6 +1072,10 @@ on:
   pull_request:
 
 name: coverage
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   coverage:
@@ -1007,27 +1100,45 @@ on:
   push:
     branches: [main, master]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
 
 name: native-checks
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+# `profile` goes to the three workflows it changes: quick skips the asan
+# containers and valgrind, and runs gctorture at step 500 instead of 20. lto,
+# rchk and analyzers take minutes either way and run on every push.
 jobs:
   sanitizers:
     uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
+    with:
+      asan: true
+      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
 
   valgrind:
     uses: pedrobtz/r-actions/.github/workflows/valgrind.yml@v1
+    with:
+      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
 
   lto:
     uses: pedrobtz/r-actions/.github/workflows/lto.yml@v1
 
   gctorture:
     uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@v1
+    with:
+      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
 
   rchk:
     uses: pedrobtz/r-actions/.github/workflows/rchk.yml@v1
+
+  analyzers:
+    uses: pedrobtz/r-actions/.github/workflows/analyzers.yml@v1
 ```
 
-All five jobs appear under a single workflow run in the GitHub UI and execute
+All six jobs appear under a single workflow run in the GitHub UI and execute
 in parallel.
 
 ### Run a subset

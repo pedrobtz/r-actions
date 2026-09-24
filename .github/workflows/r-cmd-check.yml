@@ -156,6 +156,41 @@ on:
         type: boolean
         required: false
         default: false
+      profile:
+        description: >
+          `quick` runs `quick-runners` and `quick-containers` in place of
+          `runners` and `containers`, and skips `nosuggests` and `nold`.
+          Anything else, including the default `full`, runs everything.
+
+          For a caller that runs the full set once per merge instead of on
+          every push to a pull request -- pass
+          `github.event_name == 'pull_request' && 'quick' || 'full'`. The
+          choice is the caller's to make, not something this workflow infers
+          from the event, so a caller that passes nothing gets exactly the
+          workflow it had before this input existed.
+
+          An unrecognised value is full rather than an error, so a typo
+          costs minutes rather than coverage.
+        type: string
+        required: false
+        default: full
+      quick-runners:
+        description: >
+          The `runners` matrix under `profile: quick`. One Linux leg on
+          R-release: the OS and R-version spread is what the full run is for.
+          Set to '[]' to run no runner legs in the quick profile.
+        type: string
+        required: false
+        default: '[{"os": "ubuntu-latest", "r": "release"}]'
+      quick-containers:
+        description: >
+          The `containers` matrix under `profile: quick`. clang23 alone,
+          because it is the image with CRAN's compiler major, -std=gnu23 and
+          CRAN's own C flags -- the one that reports the diagnostics a
+          pull request is least likely to have seen anywhere else.
+        type: string
+        required: false
+        default: '["clang23"]'
       timeout-minutes:
         description: Job timeout in minutes, for both jobs.
         type: number
@@ -263,7 +298,7 @@ permissions:
 
 jobs:
   runners:
-    if: inputs.runners != '[]'
+    if: (inputs.profile == 'quick' && inputs.quick-runners || inputs.runners) != '[]'
     runs-on: ${{ matrix.config.os }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
@@ -272,7 +307,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        config: ${{ fromJson(inputs.runners) }}
+        config: ${{ fromJson(inputs.profile == 'quick' && inputs.quick-runners || inputs.runners) }}
 
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
@@ -406,7 +441,7 @@ jobs:
           echo "No warnings outside the allow-list."
 
   containers:
-    if: inputs.containers != '[]'
+    if: (inputs.profile == 'quick' && inputs.quick-containers || inputs.containers) != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
@@ -415,7 +450,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        container: ${{ fromJson(inputs.containers) }}
+        container: ${{ fromJson(inputs.profile == 'quick' && inputs.quick-containers || inputs.containers) }}
 
     container:
       image: ghcr.io/r-hub/containers/${{ matrix.container }}:latest
@@ -640,7 +675,7 @@ jobs:
   # alternative -- running R CMD check by hand and grepping 00check.log for
   # WARNING -- reimplements `error_on = "warning"` to recover one package.
   nosuggests:
-    if: inputs.nosuggests
+    if: inputs.nosuggests && inputs.profile != 'quick'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
@@ -811,7 +846,7 @@ jobs:
   # No container-makevars. See the input's description: this image is not a
   # compiler flavor, and the override belongs only to those that are.
   nold:
-    if: inputs.nold
+    if: inputs.nold && inputs.profile != 'quick'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
 

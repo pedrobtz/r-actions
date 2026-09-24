@@ -7,6 +7,10 @@ on:
 
 name: fuzz
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   fuzz:
     uses: pedrobtz/r-actions/.github/workflows/fuzz.yml@v1

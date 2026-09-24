@@ -7,6 +7,10 @@ on:
 
 name: coverage
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   coverage:
     uses: pedrobtz/r-actions/.github/workflows/coverage.yml@v1

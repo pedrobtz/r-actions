@@ -8,6 +8,19 @@ on:
         type: number
         required: false
         default: 60
+      profile:
+        description: >
+          `quick` skips the job. Anything else, including the default `full`,
+          runs it. The same input, with the same meaning, as
+          r-cmd-check.yml's.
+
+          Valgrind runs the suite on a synthetic CPU, tens of times slower
+          than usual. A pull request still gets UBSan from sanitizers.yml,
+          and the heap errors and leaks only valgrind finds are caught by the
+          full run once per merge.
+        type: string
+        required: false
+        default: full
       valgrind-opts:
         description: >
           Valgrind options, delivered through VALGRIND_OPTS so they reach the
@@ -65,6 +78,7 @@ permissions:
 
 jobs:
   valgrind:
+    if: inputs.profile != 'quick'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     env:
