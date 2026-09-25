@@ -39,6 +39,17 @@ jobs:
           /tmp/lint/bin/pip install --quiet pyyaml
           /tmp/lint/bin/python tests/lint-workflows.py
 
+  alloc-interposer:
+    name: alloc-failure interposer is transparent
+    # The one piece of C this repository ships. It sits in a heredoc inside
+    # alloc-failure.yml, so nothing compiled it until a consumer's weekly run
+    # -- which is how it shipped aborting every process it was preloaded into.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build it from the workflow and run programs under it
+        run: bash tests/check-alloc-interposer.sh
+
   major-tag:
     name: v1 tracks the newest release
     # Tags do not move on a pull request, so this would only ever report the
