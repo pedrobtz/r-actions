@@ -130,6 +130,15 @@ jobs:
       # malloc would recurse forever. Allocations made while resolving are
       # served from a static arena instead, and realloc has to recognise a
       # pointer into that arena because the program will hand one back.
+      #
+      # So does free(), which is why it is interposed too. Arena memory is
+      # handed out while dlsym is resolving and to a calloc that arrives
+      # before the first resolution, and the program frees it like any other
+      # pointer. Passed to glibc, that is `free(): invalid pointer` and
+      # SIGABRT -- at exit, whether or not a failure was injected, so every
+      # swept run was reported as a crash and the sweep found nothing but
+      # its own interposer. `perl -e 1` is enough to show it;
+      # tests/check-alloc-interposer.sh does, on every pull request.
       - name: Build the allocation interposer
         run: |
           set -eu
@@ -144,6 +153,7 @@ jobs:
           static void *(*real_malloc)(size_t);
           static void *(*real_calloc)(size_t, size_t);
           static void *(*real_realloc)(void *, size_t);
+          static void  (*real_free)(void *);
 
           static long fail_at = 0;   /* 0 disables injection */
           static long counter = 0;
@@ -171,6 +181,7 @@ jobs:
             real_malloc  = (void *(*)(size_t))         dlsym(RTLD_NEXT, "malloc");
             real_calloc  = (void *(*)(size_t, size_t)) dlsym(RTLD_NEXT, "calloc");
             real_realloc = (void *(*)(void *, size_t)) dlsym(RTLD_NEXT, "realloc");
+            real_free    = (void (*)(void *))           dlsym(RTLD_NEXT, "free");
             const char *e = getenv("ALLOC_FAIL_AT");
             fail_at = e ? atol(e) : 0;
             resolving = 0;
@@ -214,6 +225,14 @@ jobs:
             if (!real_realloc) return arena_alloc(size);
             if (should_fail()) { errno = ENOMEM; return NULL; }
             return real_realloc(ptr, size);
+          }
+
+          /* Arena memory is never returned: the arena is small, used only
+             during bootstrap, and not worth a free list. */
+          void free(void *ptr) {
+            if (ptr == NULL || from_arena(ptr)) return;
+            init();
+            if (real_free) real_free(ptr);
           }
 
           __attribute__((destructor))
