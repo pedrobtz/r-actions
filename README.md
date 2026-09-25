@@ -921,6 +921,25 @@ Each leg prints `uname -m`, `.Machine$sizeof.pointer` and
 another architecture, and policy and URL checks answer nothing new here while
 adding failure modes that have nothing to do with the architecture.
 
+**A leg that ran nothing is not green.** `R CMD check` exits non-zero only on
+an ERROR, and a package whose `tests/testthat.R` guards `library(testthat)`
+(as CRAN's no-Suggests check requires) skips its whole suite where testthat is
+not installed — which, in these source-only images, is the default. Two inputs
+close both holes:
+
+```yaml
+    with:
+      error-on: warning      # fail on `Status: ... WARNING`; default `error`
+      require-tests: true    # fail unless some testthat expectation passed
+```
+
+`require-tests` counts the `PASS` totals in `<pkg>.Rcheck/tests/*.Rout` and
+prints them, so the log shows how much actually ran. Pair it with a `setup`
+that installs testthat (`r-cran-testthat` on Debian) or an
+`install-dependencies` that builds it. On the Debian images, also generate
+`en_US.UTF-8` (`locales`, `locale-gen`): `R CMD check` sets that locale and
+reports a WARNING when the image cannot honour it.
+
 ### `analyzers.yml` — static analysis, starting with `-fanalyzer`
 
 The other two static checks here are narrow on purpose: `rchk.yml` reasons
