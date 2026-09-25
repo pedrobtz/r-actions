@@ -869,6 +869,23 @@ raise. It is empty by default, because the right pattern is package-specific.
 
 Keep `run` small — it runs once per allocation in the sweep, so this belongs
 on a schedule. `max-allocations` caps the sweep.
+
+**Show that the sweep reached your code.** Most allocation positions in an R
+workload belong to R, so "every failure was handled" can be true of a sweep
+that never touched the package. `target-pattern` counts the runs whose output
+matches the error your own allocation failures produce, and reports it;
+`min-target-hits` makes too few a failure:
+
+```yaml
+      target-pattern: "ZUC_ERR_MEMORY"
+      min-target-hits: 1
+```
+
+Put everything that is not the workload — attaching the package, reading
+metadata, building inputs — in `baseline-run` as well as in `run`, so it sits
+under the floor, and consider `R_ENABLE_JIT=0` in both. A failed allocation
+inside R's byte-code compiler or its regex engine can crash R itself, which
+is a finding about R rather than about your package.
 ### `arch.yml` — architectures the check matrix never reaches
 
 `r-cmd-check.yml` covers CRAN's compilers well and its architectures barely at
