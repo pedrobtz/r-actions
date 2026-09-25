@@ -80,6 +80,34 @@ on:
         type: string
         required: false
         default: ""
+      target-pattern:
+        description: >
+          Extended regular expression marking an injected failure that
+          reached the code this job is for. Every swept run whose output
+          matches it is counted, and the count is reported.
+
+          The sweep fails allocations by position, and most positions in any
+          R workload belong to R itself. A green sweep proves only that
+          whatever it hit was handled -- not that it hit the package at all.
+          Setting this to the error the package's own allocation failures
+          produce turns "no crashes" into "no crashes, and N of the failures
+          were ours":
+
+              target-pattern: "ZUC_ERR_MEMORY"
+
+          Empty by default: nothing is counted.
+        type: string
+        required: false
+        default: ""
+      min-target-hits:
+        description: >
+          Fail unless at least this many swept runs matched target-pattern.
+          0, the default, only reports. Set it to 1 or more once the count
+          has been seen, so that a sweep that silently stopped reaching the
+          package goes red instead of staying vacuously green.
+        type: number
+        required: false
+        default: 0
       timeout-minutes:
         type: number
         required: false
@@ -300,6 +328,8 @@ jobs:
         env:
           RUN_COMMAND: ${{ inputs.run }}
           EXPECT: ${{ inputs.expect-pattern }}
+          TARGET: ${{ inputs.target-pattern }}
+          MIN_HITS: ${{ inputs.min-target-hits }}
           START: ${{ steps.range.outputs.start }}
           END: ${{ steps.range.outputs.end }}
         run: |
@@ -307,6 +337,7 @@ jobs:
           : > crashes.txt
           : > silent.txt
           checked=0
+          hits=0
 
           n="$START"
           while [ "$n" -le "$END" ] && [ "$END" -gt 0 ]; do
@@ -316,6 +347,10 @@ jobs:
               sh -c "$RUN_COMMAND" > "out.${n}" 2>&1
             status=$?
             set -e
+
+            if [ -n "$TARGET" ] && grep -qE "$TARGET" "out.${n}"; then
+              hits=$((hits + 1))
+            fi
 
             if [ "$status" -ge 128 ]; then
               echo "N=${n} died on signal $((status - 128))"
@@ -341,6 +376,7 @@ jobs:
           echo "checked=${checked}" >> "$GITHUB_OUTPUT"
           echo "crashes=${crashes}" >> "$GITHUB_OUTPUT"
           echo "silent=${silent}"   >> "$GITHUB_OUTPUT"
+          echo "hits=${hits}"       >> "$GITHUB_OUTPUT"
 
           {
             echo "## Allocation-failure injection"
@@ -352,6 +388,7 @@ jobs:
             echo "| failures injected | ${checked} |"
             echo "| **died on a signal** | ${crashes} |"
             [ -z "$EXPECT" ] || echo "| errored without matching the pattern | ${silent} |"
+            [ -z "$TARGET" ] || echo "| **reached the target** (/${TARGET}/) | ${hits} |"
             echo
             if [ "$crashes" -gt 0 ]; then
               echo '```'
@@ -372,6 +409,13 @@ jobs:
           if [ "$silent" -gt 0 ]; then
             echo "::error::${silent} injected failure(s) errored without matching expect-pattern"
             exit 1
+          fi
+          if [ -n "$TARGET" ]; then
+            echo "${hits} of ${checked} injected failures reached the target (/${TARGET}/)."
+            if [ "$hits" -lt "$MIN_HITS" ]; then
+              echo "::error::only ${hits} injected failure(s) reached /${TARGET}/; min-target-hits is ${MIN_HITS}. The sweep is not reaching the code it is for."
+              exit 1
+            fi
           fi
           echo "all ${checked} injected allocation failures were handled."
 
