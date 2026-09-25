@@ -62,6 +62,27 @@ on:
         type: boolean
         required: false
         default: false
+      tag-pattern:
+        description: >
+          Regular expression a tag must match to count as upstream's latest
+          version. Empty, the default, considers every release.
+
+          For a library with a long-term-support line, this is how to watch
+          that line instead of whatever upstream released last:
+
+              tag-pattern: '^tf-psa-crypto-1\.1\.[0-9]+$'
+
+          Without it, a package pinned to an LTS branch gets an issue for
+          every feature release on the newer line, each closed with the same
+          reason, which teaches everyone to ignore the notifier. Matched with
+          jq's test(), so the syntax is PCRE-like; anchor it. Releases are
+          searched first (newest first, prereleases only with
+          include-prereleases), then tags; the job fails if nothing matches,
+          since a pattern that matches nothing is a typo, not an up-to-date
+          package.
+        type: string
+        required: false
+        default: ""
       labels:
         description: >
           Comma-separated labels for the issue this opens. Left empty by
@@ -114,6 +135,7 @@ jobs:
         env:
           UPSTREAM: ${{ inputs.upstream-repo }}
           PRERELEASES: ${{ inputs.include-prereleases }}
+          TAG_PATTERN: ${{ inputs.tag-pattern }}
         run: |
           set -euo pipefail
           latest=""
@@ -134,7 +156,26 @@ jobs:
             fi
           }
 
-          if [ "$PRERELEASES" = "true" ]; then
+          if [ -n "$TAG_PATTERN" ]; then
+            # The pattern and the prerelease switch reach jq through the
+            # environment, not by splicing them into the filter text, so a
+            # pattern containing a quote cannot change what the filter does.
+            latest="$(try_api "repos/${UPSTREAM}/releases?per_page=100" \
+              '[.[] | select(.draft | not)
+                    | select((.prerelease | not) or (env.PRERELEASES == "true"))
+                    | .tag_name | select(test(env.TAG_PATTERN))][0] // empty')"
+            source="latest release matching ${TAG_PATTERN}"
+            if [ -z "$latest" ]; then
+              latest="$(try_api "repos/${UPSTREAM}/tags?per_page=100" \
+                '[.[] | .name | select(test(env.TAG_PATTERN))][0] // empty')"
+              source="most recent tag matching ${TAG_PATTERN}"
+            fi
+            if [ -z "$latest" ]; then
+              echo "::error::no release or tag of ${UPSTREAM} matches tag-pattern ${TAG_PATTERN}."
+              echo "::error::A pattern that matches nothing is a mistake, not an up-to-date package."
+              exit 1
+            fi
+          elif [ "$PRERELEASES" = "true" ]; then
             latest="$(try_api "repos/${UPSTREAM}/releases" '.[0].tag_name // empty')"
             source="releases (including prereleases)"
           else

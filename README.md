@@ -566,6 +566,23 @@ defect, and a red X on unrelated PRs is the kind of signal people route around
 issue (left empty by default, because a label that does not exist in your
 repository makes the API call fail).
 
+**Following a long-term-support line.** By default "latest" is whatever
+upstream released last. A package pinned to an LTS branch would then get an
+issue for every feature release on the newer line, each closed with the same
+reason — which is how a notifier becomes noise. `tag-pattern` restricts the
+comparison to tags that match it:
+
+```yaml
+    with:
+      upstream-repo: Mbed-TLS/TF-PSA-Crypto
+      current-version: awk -F'\t' 'NR > 1 { print $3 }' tools/vendor/manifest.tsv
+      tag-pattern: '^tf-psa-crypto-1\.1\.[0-9]+$'
+```
+
+Releases are searched first, then tags. A pattern that matches nothing
+*does* fail the job: that is a typo in the caller, like an unreadable
+repository, not news about upstream.
+
 It also reports any **published security advisories** on the upstream
 repository. That is best-effort: it is keyed on the repository rather than on
 a package name in an ecosystem a vendored C library does not belong to, and a
