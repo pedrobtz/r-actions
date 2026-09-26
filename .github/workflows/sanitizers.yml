@@ -186,15 +186,20 @@ on:
         default: ""
       asan-dependencies:
         description: >
-          Install the package's dependencies in the `asan` job. Suggests are
-          included, because `R CMD check` treats a missing one as an ERROR --
-          which is what this job did until it was run against a real package.
+          Install all of the package's dependencies in the `asan` job,
+          Suggests included, because `R CMD check` treats a missing one as an
+          ERROR -- which is what this job did until it was run against a real
+          package.
 
-          Turn it off when `asan-run` needs nothing but base R. Anything the
-          image's repository has no binary for is built from source, and a
-          dependency with compiled code is built instrumented, so the cost
-          varies from seconds to the whole job depending on what you depend
-          on.
+          Turn it off when `asan-run` needs nothing beyond the package itself.
+          The hard dependencies (Depends, Imports, LinkingTo) are still
+          installed, because without them the package cannot be installed at
+          all -- a header-only LinkingTo such as BH is the common case -- and
+          for a package with none it costs a pak resolution and nothing more.
+          Anything the image's repository has no binary for is built from
+          source, and a dependency with compiled code is built instrumented,
+          so the cost of `true` varies from seconds to the whole job depending
+          on what you suggest.
         type: boolean
         required: false
         default: true
@@ -460,11 +465,17 @@ jobs:
       # missing Suggests as an ERROR, not a NOTE, and most of these images'
       # binary repository does not carry them. _R_CHECK_FORCE_SUGGESTS_ below
       # is the backstop for the ones that still fail to build instrumented.
+      # Hard dependencies always: R CMD INSTALL refuses to build a package
+      # whose Depends, Imports or LinkingTo are missing, so skipping them is
+      # not "fewer dependencies", it is a job that cannot start. pak reads NA
+      # as exactly those three fields.
       - name: Install dependencies
-        if: inputs.asan-dependencies
+        env:
+          ALL_DEPENDENCIES: ${{ inputs.asan-dependencies }}
         run: |
           set -eu
-          Rscript -e 'pak::local_install_deps(".", dependencies = TRUE, upgrade = FALSE)'
+          if [ "$ALL_DEPENDENCIES" = "true" ]; then deps=TRUE; else deps=NA; fi
+          Rscript -e "pak::local_install_deps('.', dependencies = ${deps}, upgrade = FALSE)"
 
       # After the dependencies, deliberately: they are built with the image's
       # own flags, and there is nothing to learn from a suggested package's

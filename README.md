@@ -453,7 +453,7 @@ jobs:
     with:
       asan: true
       asan-containers: '["clang-asan", "gcc-asan"]'   # default
-      asan-dependencies: false                        # default true
+      asan-dependencies: false                        # default true; false = hard deps only
       asan-run: Rscript tools/sanitizer-exercise.R
 ```
 
@@ -469,7 +469,9 @@ or a package whose interesting paths are not the ones its tests spend time on.
 A sanitizer earns its keep on error and unwind paths — where an R-level
 `longjmp` skips whatever C had allocated — and an ordinary suite exercises
 those only incidentally. A driver aimed at them needs no dependencies at all,
-so pair it with `asan-dependencies: false`.
+so pair it with `asan-dependencies: false`. That still installs the hard
+dependencies (Depends, Imports, LinkingTo), since the package cannot be
+installed without them; only the Suggests are skipped.
 
 ### `vendor.yml` — vendored-source guard
 
