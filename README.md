@@ -375,6 +375,9 @@ A package's check page lists any findings under "Additional issues".
 | gcc-ASAN | the same run as gcc-UBSAN | `asan (gcc-asan)` |
 | clang-ASAN | `-fsanitize=address,undefined`, `-O3` | `asan (clang-asan)` |
 | valgrind | `--use-valgrind`, R built with instrumentation level 2 | `valgrind.yml`, on a stock R |
+| rcnst | `R_CHECK_CONSTANTS=5`, all code byte-compiled | `cran-special.yml` `rcnst` |
+| rlibro | check against a read-only library | `cran-special.yml` `rlibro` |
+| vnu | Nu HTML checker over `pkg2HTML()` output | `cran-special.yml` `vnu` |
 | [M1-SAN](https://www.stats.ox.ac.uk/pub/bdr/M1-SAN/README.txt) (macOS arm64) | Apple clang, `-fsanitize=address,undefined` | not covered; run it locally, see below |
 
 The two UBSan legs are not redundant. clang treats a trailing array of any
@@ -1041,6 +1044,70 @@ that installs testthat (`r-cran-testthat` on Debian) or an
 `en_US.UTF-8` (`locales`, `locale-gen`): `R CMD check` sets that locale and
 reports a WARNING when the image cannot honour it.
 
+### `cran-special.yml` — rcnst, rlibro and vnu
+
+Three of the checks CRAN runs after acceptance and lists under "Additional
+issues" on a package's check page, which nothing else here reproduces. Each is
+run the way CRAN's own README for it says to run it:
+
+| job | CRAN check | catches |
+|:--|:--|:--|
+| `rcnst` | [rcnst](https://raw.githubusercontent.com/kalibera/cran-checks/master/rcnst/README.txt) | `.Call` code that writes into an argument in place and so overwrites a compiler constant: afterwards a string literal in some unrelated function reads as something else |
+| `rlibro` | [rlibro](https://raw.githubusercontent.com/kalibera/cran-checks/master/rlibro/README.txt) | a package that writes into its own installation directory, which works on a laptop and fails wherever the library is shared or read-only |
+| `vnu` | [vnu](https://www.r-project.org/nosvn/vnu/README.txt) | invalid HTML in the reference manual, almost always from raw HTML passed through `\out{}` or `\if{html}{}` |
+
+```yaml
+jobs:
+  cran-special:
+    uses: pedrobtz/r-actions/.github/workflows/cran-special.yml@v1
+    with:
+      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
+```
+
+**Full profile only.** `profile: quick` skips all three. Each is a full
+`R CMD check` run a different way, and none looks at anything a pull request's
+quick set would otherwise miss for longer than one merge.
+
+All three CRAN READMEs say their check does not false-alarm, so every job
+**fails** on a finding from the first run, unlike `rchk.yml` and
+`analyzers.yml`, which start out advisory. Each was also shown to fail: a
+synthetic package with one bug of each kind passed an ordinary
+`R CMD check --as-cran` with `Status: OK`, and failed all three jobs.
+
+- **`rcnst`** sets `R_COMPILE_PKGS=1`, `R_JIT_STRATEGY=4` and
+  `R_CHECK_CONSTANTS=5` for the whole check. R then compares the byte-code
+  compiler's constants after every `.Call` whose arguments changed, and ends
+  the process with `Fatal error: compiler constants were modified!` when one
+  did. It does not see a corrupted integer, double or logical scalar, which
+  the byte-code engine keeps unboxed, so `x <- 1L` never shares the constant.
+  Strings and vectors are what it catches. A package without `src/` skips the
+  check.
+- **`rlibro`** installs the package, takes write permission away from that
+  library and from the one holding its dependencies, proves a write now fails,
+  and runs `R CMD check --install=check:00install.out` against it. That reuses
+  the install rather than letting check make a fresh, writable one in
+  `.Rcheck`, which would test nothing. A finding is a `Permission denied` or
+  `Read-only file system` line that names one of those libraries. The path
+  filter is what keeps a test that checks your own permission-error handling
+  from counting. It runs on the runner, not in a container, because root
+  ignores `chmod`.
+- **`vnu`** renders the Rd with `tools::pkg2HTML(concordance = TRUE)` and
+  validates it with the Nu HTML checker, via `W3CMarkupValidator` and
+  `vnu.jar`, in a private library. Errors fail the job and name the Rd file
+  and line; warnings are reported and do not. It needs R 4.4.0 or later, for
+  `pkg2HTML`, and it installs none of the package's dependencies.
+
+Optional inputs:
+
+```yaml
+    with:
+      profile: full            # default; quick skips every job
+      r-version: release       # default; CRAN runs rcnst and rlibro on devel
+      timeout-minutes: 30      # default, per job
+      env: |                   # extra env for the rcnst and rlibro check steps
+        MYPKG_SLOW_TESTS=true
+```
+
 ### `analyzers.yml` — static analysis, starting with `-fanalyzer`
 
 The other two static checks here are narrow on purpose: `rchk.yml` reasons
@@ -1102,7 +1169,7 @@ request had already checked — a pull request run checks the merge with its
 base, not the branch alone. Across three packages that second run was 28 to
 39% of the runner time their pushes and pull requests used.
 
-`profile` splits the two. Four workflows take `profile: quick` and do less:
+`profile` splits the two. Five workflows take `profile: quick` and do less:
 
 | Workflow | `quick` | `full` (the default) |
 |---|---|---|
@@ -1110,6 +1177,7 @@ base, not the branch alone. Across three packages that second run was 28 to
 | `gctorture.yml` | `quick-step` (500) | `step` (20) |
 | `sanitizers.yml` | UBSan only | UBSan, and the `asan` job when on |
 | `valgrind.yml` | skipped | runs |
+| `cran-special.yml` | skipped | `rcnst`, `rlibro` and `vnu` |
 
 The caller picks the profile. Nothing here reads the event for itself, and a
 caller that passes nothing gets the workflow it had before this input
@@ -1245,9 +1313,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
-# `profile` goes to the three workflows it changes: quick skips the asan
-# containers and valgrind, and runs gctorture at step 500 instead of 20. lto,
-# rchk and analyzers take minutes either way and run on every push.
+# `profile` goes to the four workflows it changes: quick skips the asan
+# containers, valgrind and cran-special, and runs gctorture at step 500
+# instead of 20. lto, rchk and analyzers take minutes either way and run on
+# every push.
 jobs:
   sanitizers:
     uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
@@ -1273,9 +1342,14 @@ jobs:
 
   analyzers:
     uses: pedrobtz/r-actions/.github/workflows/analyzers.yml@v1
+
+  cran-special:
+    uses: pedrobtz/r-actions/.github/workflows/cran-special.yml@v1
+    with:
+      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
 ```
 
-All six jobs appear under a single workflow run in the GitHub UI and execute
+All seven jobs appear under a single workflow run in the GitHub UI and execute
 in parallel.
 
 ### Run a subset

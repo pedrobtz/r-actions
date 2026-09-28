@@ -1,0 +1,419 @@
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: >
+          `quick` skips every job here; anything else, including the default
+          `full`, runs them all. The same input, with the same meaning, as
+          r-cmd-check.yml's and sanitizers.yml's.
+
+          These are CRAN's after-the-fact checks -- the ones its check page
+          lists under "Additional issues" -- and each is a full R CMD check
+          run a different way. Together they are three more checks per push,
+          which is the wrong price for a pull request and the right one for
+          a merge.
+        type: string
+        required: false
+        default: full
+      r-version:
+        description: >
+          R version for all three jobs. CRAN runs rcnst and rlibro on
+          R-devel; `release` is the default here because the checks
+          themselves have not changed since R 4.x, and a devel-only failure
+          in one of them is better found by the devel legs elsewhere. vnu
+          needs 4.4.0 or later, where `tools::pkg2HTML()` first appeared.
+        type: string
+        required: false
+        default: release
+      timeout-minutes:
+        description: >
+          Job timeout in minutes, for each job. rcnst is the one that can
+          be slow: it byte-compiles everything and checks the compiler's
+          constants at every step, which CRAN warns is a significant
+          slow-down. On mdbx, whose tests spend their time in C, it took
+          42 s against 41 s for a plain check; it scales with how much R
+          code the suite runs.
+        type: number
+        required: false
+        default: 30
+      env:
+        description: >
+          Extra environment variables for the check steps, one NAME=VALUE
+          per line, for the same reason sanitizers.yml takes them: to opt
+          into test paths a package normally skips. Not applied to the vnu
+          job, which runs no package code.
+
+          Do not put secrets here: workflow inputs are not masked in logs.
+        type: string
+        required: false
+        default: ""
+
+name: cran-special
+
+# Nothing here writes through the token, so `contents: read` is enough: the
+# jobs read the checkout, and artifact upload and the cache need no declared
+# scope.
+#
+# This is not only least privilege. `read-all` is wider than the `read` that a
+# repository hands its GITHUB_TOKEN by default, and a called workflow cannot
+# be granted more than its caller holds -- so requesting it here made every
+# caller that did not declare permissions of its own fail with an unannotated
+# `startup_failure`, two seconds in, before any job was created.
+permissions:
+  contents: read
+
+# Three of CRAN's "Additional issues" that no other workflow here reaches.
+# Each is what CRAN's own README for the check says it is, and each is run
+# the way that README says to run it:
+#
+#   rcnst    https://raw.githubusercontent.com/kalibera/cran-checks/master/rcnst/README.txt
+#   rlibro   https://raw.githubusercontent.com/kalibera/cran-checks/master/rlibro/README.txt
+#   vnu      https://www.r-project.org/nosvn/vnu/README.txt
+#
+# All three say they do not false-alarm. That is what lets them fail the job
+# from the first run, where rchk.yml and analyzers.yml start out advisory.
+jobs:
+  # Corruption of R constants. Immutability is enforced in R code and cannot
+  # be in C, so `.Call` code that writes into an argument in place -- an
+  # INTEGER(x)[0] = ... on something the caller passed -- can overwrite a
+  # literal that the byte-code compiler shares: afterwards `1L` may read as
+  # something else, in any function, until the session ends. The three
+  # variables make R byte-compile everything and verify the compiler's
+  # constants at the strictest level, so the write is caught where it
+  # happens instead of wherever the corrupted literal is used next.
+  #
+  # A pure-R package cannot corrupt a constant on its own, so the job stops
+  # early rather than spending a full check proving nothing.
+  rcnst:
+    if: inputs.profile != 'quick'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+      R_COMPILE_PKGS: "1"
+      R_JIT_STRATEGY: "4"
+      R_CHECK_CONSTANTS: "5"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Nothing to corrupt without compiled code
+        id: src
+        run: |
+          if [ -d src ]; then
+            echo "has-src=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-src=false" >> "$GITHUB_OUTPUT"
+            echo "No src/ directory: only compiled code can modify a constant in place."
+          fi
+
+      - uses: r-lib/actions/setup-r@v2
+        if: steps.src.outputs.has-src == 'true'
+        with:
+          r-version: ${{ inputs.r-version }}
+          http-user-agent: release
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        if: steps.src.outputs.has-src == 'true'
+        with:
+          extra-packages: any::rcmdcheck
+          needs: check
+
+      # Job-level env reaches every process R CMD check starts, but a check
+      # that ran without it would look exactly like a clean one. Read the
+      # three back from inside R before trusting the result.
+      - name: Verify the constants check is armed
+        if: steps.src.outputs.has-src == 'true'
+        shell: Rscript {0}
+        run: |
+          v <- Sys.getenv(c("R_COMPILE_PKGS", "R_JIT_STRATEGY", "R_CHECK_CONSTANTS"))
+          print(v)
+          if (!identical(unname(v), c("1", "4", "5")))
+            stop("rcnst environment did not reach R")
+
+      - name: Apply caller environment
+        if: steps.src.outputs.has-src == 'true' && inputs.env != ''
+        env:
+          CALLER_ENV: ${{ inputs.env }}
+        run: |
+          set -eu
+          printf '%s\n' "$CALLER_ENV" | while IFS= read -r line; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+              *) echo "Ignoring malformed env line: $line" >&2 ;;
+            esac
+          done
+
+      - name: Run R CMD check with constants checking
+        if: steps.src.outputs.has-src == 'true'
+        shell: Rscript {0}
+        run: |
+          if (Sys.getenv("_R_CHECK_CRAN_INCOMING_", "") == "") Sys.setenv("_R_CHECK_CRAN_INCOMING_" = "false")
+          rcmdcheck::rcmdcheck(
+            args = c("--no-manual", "--as-cran"),
+            build_args = c("--no-manual"),
+            error_on = "warning",
+            check_dir = "check"
+          )
+
+      # A corrupted constant ends R with "Fatal error: compiler constants were
+      # modified", which R CMD check reports as an ordinary test or example
+      # ERROR -- the step above already turns that into a red job. This names
+      # the cause, so the log does not have to be read to know which kind of
+      # failure it was. "were modified" is the string kalibera's notes say to
+      # search for; the other two are the lines above it that say what was
+      # modified and by which .Call.
+      - name: Name a constants finding
+        if: always() && steps.src.outputs.has-src == 'true'
+        run: |
+          set +e -u
+          hits=$(find check -type f \( -name '*.Rout' -o -name '*.Rout.fail' -o -name 00check.log \) \
+                   -exec grep -h -E 'compiler constants were modified|modification of compiler constant|modified its argument' {} + \
+                 2>/dev/null | sort -u)
+          if [ -n "$hits" ]; then
+            printf '%s\n' "$hits"
+            echo "::error::rcnst: a constant was modified; see the check-rcnst artifact"
+            exit 1
+          fi
+          echo "No constants finding."
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.src.outputs.has-src == 'true'
+        with:
+          name: check-rcnst
+          path: check
+          if-no-files-found: ignore
+
+  # A package that writes into the directory it was installed to. It works on
+  # a laptop, where the library is the user's own, and fails wherever the
+  # library is shared or mounted read-only. CRAN runs a regular check with
+  # the library mounted read-only and greps for the resulting errors; the
+  # only listed offender at the time of writing was caught saving an .rds
+  # into its own inst/ from an example.
+  #
+  # The same shape here without a mount: install first, take write
+  # permission away from the whole library, then run R CMD check against it
+  # with --install=check:FILE, which reuses that install log instead of
+  # installing again. The runner user is not root, so chmod is honoured;
+  # this could not be a container job, where root ignores it. The check
+  # dir itself stays writable, as CRAN's does.
+  rlibro:
+    if: inputs.profile != 'quick'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ inputs.r-version }}
+          http-user-agent: release
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          needs: check
+
+      - name: Apply caller environment
+        if: inputs.env != ''
+        env:
+          CALLER_ENV: ${{ inputs.env }}
+        run: |
+          set -eu
+          printf '%s\n' "$CALLER_ENV" | while IFS= read -r line; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+              *) echo "Ignoring malformed env line: $line" >&2 ;;
+            esac
+          done
+
+      - name: Build and install into the library
+        run: |
+          set -eu
+          R CMD build --no-manual --no-build-vignettes .
+          tarball=$(ls -t ./*.tar.gz | head -1)
+          echo "TARBALL=${tarball}" >> "$GITHUB_ENV"
+          LIB="${RUNNER_TEMP}/rlibro-lib"
+          mkdir -p "$LIB"
+          echo "RLIBRO_LIB=${LIB}" >> "$GITHUB_ENV"
+          R CMD INSTALL --library="$LIB" "$tarball" 2>&1 | tee 00install.out
+
+      # The dependencies too, not only the package: CRAN's library is
+      # read-only as a whole, and its README notes a package may be reported
+      # while a dependency is at fault. Reported here the same way, so the
+      # two runs agree.
+      #
+      # Then prove it took. A write that succeeds means the permissions did
+      # not apply -- root, or a filesystem that ignores them -- and the check
+      # that follows would pass without testing anything.
+      - name: Make the library read-only
+        run: |
+          set -eu
+          USER_LIB="$(Rscript -e 'cat(.libPaths()[1])')"
+          for d in "$RLIBRO_LIB" "$USER_LIB"; do
+            chmod -R a-w "$d"
+            echo "read-only: $d"
+          done
+          if touch "$RLIBRO_LIB/probe" 2>/dev/null; then
+            echo "::error::the library is still writable after chmod; this job cannot test anything here"
+            exit 1
+          fi
+          echo "USER_LIB=${USER_LIB}" >> "$GITHUB_ENV"
+
+      - name: Run R CMD check against the read-only library
+        env:
+          _R_CHECK_CRAN_INCOMING_: "false"
+        run: |
+          set -u
+          status=0
+          R CMD check --no-manual --as-cran --install=check:00install.out \
+            --library="$RLIBRO_LIB" "$TARBALL" || status=$?
+          echo "CHECK_STATUS=${status}" >> "$GITHUB_ENV"
+
+      # Two gates. The exit status is R CMD check's own verdict, and the grep
+      # is CRAN's: its README says the outputs are searched for errors about
+      # writing to a read-only file system. On a mount that reads "Read-only
+      # file system"; on removed permissions, as here, "Permission denied".
+      #
+      # A hit must also name one of the two read-only libraries. "Permission
+      # denied" on its own is the text of any test that checks its package
+      # reports an unwritable path correctly, and those are not findings.
+      # R's error carries the path on the same line --
+      #   cannot open file '<lib>/pkg/x.rds': Permission denied
+      # -- so filtering by it costs nothing. A finding counts whether or not
+      # the test that hit it went on to fail.
+      - name: Fail on a write into the library
+        if: always()
+        run: |
+          set +e -u
+          hits=$(find . -path './*.Rcheck/*' -type f \( -name '*.Rout' -o -name '*.Rout.fail' -o -name 00check.log \) \
+                   -exec grep -h -E "Read-only file system|Permission denied" {} + 2>/dev/null \
+                 | grep -F -e "${RLIBRO_LIB:-/nonexistent}" -e "${USER_LIB:-/nonexistent}" | sort -u)
+          if [ -n "$hits" ]; then
+            printf '%s\n' "$hits"
+            echo "::error::rlibro: the package (or a dependency) wrote into the read-only library; see the check-rlibro artifact"
+            exit 1
+          fi
+          if [ "${CHECK_STATUS:-1}" -ne 0 ]; then
+            echo "::error::R CMD check failed (exit ${CHECK_STATUS:-1}) for a reason other than a write into the library; see the check-rlibro artifact"
+            exit "${CHECK_STATUS:-1}"
+          fi
+          echo "No write into the read-only library."
+
+      # Put the permissions back so the runner's own cleanup and the upload
+      # below are not fighting a read-only tree.
+      - name: Restore write permission
+        if: always()
+        run: |
+          for d in "${RLIBRO_LIB:-}" "${USER_LIB:-}"; do
+            [ -n "$d" ] && [ -d "$d" ] && chmod -R u+w "$d" || true
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: check-rlibro
+          path: |
+            *.Rcheck
+            00install.out
+          if-no-files-found: ignore
+
+  # HTML validity of the reference manual, with the same validator and the
+  # same recipe as CRAN's vnu check: render the package's Rd to one HTML
+  # file with tools::pkg2HTML() and run the Nu HTML checker over it. Rd that
+  # is entirely markup cannot go wrong here; the risk is \out{} and
+  # \if{html}{}, which pass raw HTML through, and a tag left open there is
+  # invalid HTML in every help page that includes it.
+  #
+  # No package dependencies are installed and nothing is run: pkg2HTML
+  # works from the built tarball alone.
+  vnu:
+    if: inputs.profile != 'quick'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ inputs.r-version }}
+          http-user-agent: release
+
+      # pkg2HTML arrived in R 4.4.0, and the validator is a jar. The runner
+      # images ship a JDK; the check is here for anyone running this on a
+      # runner that does not.
+      - name: Check the prerequisites
+        run: |
+          set -eu
+          java -version 2>&1 | head -1
+          Rscript -e 'if (getRversion() < "4.4.0") stop("vnu needs R >= 4.4.0 for tools::pkg2HTML(); this is ", getRversion())'
+
+      # W3CMarkupValidator is on CRAN; vnu.jar is the checker itself,
+      # packaged for R and served from the repository CRAN's README names
+      # for it. A private library, so neither lands among the package's own
+      # dependencies.
+      - name: Install the validator
+        run: |
+          set -eu
+          LIB="${RUNNER_TEMP}/vnu-lib"
+          mkdir -p "$LIB"
+          echo "VNU_LIB=${LIB}" >> "$GITHUB_ENV"
+          Rscript -e '
+            lib <- Sys.getenv("LIB")
+            install.packages("W3CMarkupValidator", lib = lib, repos = "https://cloud.r-project.org")
+            install.packages("vnu.jar", lib = lib, type = "source", repos = "https://datacube.wu.ac.at/")
+          '
+        env:
+          LIB: ${{ runner.temp }}/vnu-lib
+
+      - name: Build the package
+        run: |
+          set -eu
+          R CMD build --no-manual --no-build-vignettes .
+          echo "TARBALL=$(ls -t ./*.tar.gz | head -1)" >> "$GITHUB_ENV"
+
+      # `concordance = TRUE` is what makes a finding name the Rd file and
+      # line rather than a position in the generated HTML. Errors fail the
+      # job; warnings and infos are reported and do not, which is the line
+      # CRAN draws in what it lists.
+      - name: Validate the reference manual
+        shell: Rscript {0}
+        run: |
+          .libPaths(c(Sys.getenv("VNU_LIB"), .libPaths()))
+          library(W3CMarkupValidator)
+          out <- "refman.html"
+          tools::pkg2HTML(Sys.getenv("TARBALL"), out = out, concordance = TRUE)
+          bad <- w3c_markup_validate(file = out, jar = TRUE, concordance = TRUE)
+          # One row per finding, typed "error", "warning" or "info".
+          ne <- sum(bad$type == "error"); nw <- sum(bad$type == "warning")
+          report <- capture.output(inspect(bad))
+          writeLines(report, "vnu-report.txt")
+          cat(report, sep = "\n")
+          summary <- Sys.getenv("GITHUB_STEP_SUMMARY")
+          if (nzchar(summary)) {
+            cat(sprintf("### vnu: %d error(s), %d warning(s)\n\n", ne, nw), file = summary, append = TRUE)
+            if (ne + nw > 0) cat("```\n", paste(report, collapse = "\n"), "\n```\n", file = summary, append = TRUE)
+          }
+          if (ne > 0) {
+            cat(sprintf("::error::vnu: the reference manual has %d HTML error(s); see the vnu artifact\n", ne))
+            quit(status = 1)
+          }
+          cat("The reference manual is valid HTML.\n")
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vnu
+          path: |
+            refman.html
+            vnu-report.txt
+          if-no-files-found: ignore
