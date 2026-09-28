@@ -375,7 +375,7 @@ A package's check page lists any findings under "Additional issues".
 | gcc-ASAN | the same run as gcc-UBSAN | `asan (gcc-asan)` |
 | clang-ASAN | `-fsanitize=address,undefined`, `-O3` | `asan (clang-asan)` |
 | valgrind | `--use-valgrind`, R built with instrumentation level 2 | `valgrind.yml`, on a stock R |
-| M1-SAN (macOS arm64) | `-fsanitize=address,undefined` | not covered |
+| [M1-SAN](https://www.stats.ox.ac.uk/pub/bdr/M1-SAN/README.txt) (macOS arm64) | Apple clang, `-fsanitize=address,undefined` | not covered; run it locally, see below |
 
 The two UBSan legs are not redundant. clang treats a trailing array of any
 size as flexible, so it never checks one. gcc's `bounds-strict` checks each
@@ -389,6 +389,33 @@ every instrumented process its own report file. Without that, a finding in a
 child process is only as visible as the child's stderr. If a test spawns
 `Rscript` and compares its output, it fails with the diagnostic as the
 "actual" value. If a test discards that output, the finding disappears.
+
+**M1-SAN on your own Mac.** This one matters on its own terms, because arm64
+makes different choices from x86-64: libmdbx's misaligned accesses gave M1-SAN
+three sites where Linux gave five. On Apple silicon with the Command Line
+Tools, point `R_MAKEVARS_USER` at a file containing
+
+```make
+CC=clang -fsanitize=address,undefined -fno-omit-frame-pointer
+CXX=clang++ -fsanitize=address,undefined -fno-omit-frame-pointer
+CXX17=$(CXX)
+CXX20=$(CXX)
+LDFLAGS=-fsanitize=address,undefined -Wl,-rpath,<output of: clang -print-runtime-dir>
+```
+
+and install into a scratch library with `R CMD INSTALL --preclean`. Then run
+the tests with `MallocNanoZone=0`, `UBSAN_OPTIONS=print_stacktrace=1` and
+`ASAN_OPTIONS=verify_interceptors=0:detect_leaks=0`. The last setting is
+needed because CRAN's M1-SAN R is itself built with ASan and yours is not. With
+it, the ASan runtime arrives with your package rather than at launch, so UBSan
+is complete but ASan's heap checks are off. The `asan` containers above cover
+the heap. For mdbx this reproduced M1-SAN's log exactly: the same three sites,
+and the same 1 failed / 987 passed.
+
+`DYLD_INSERT_LIBRARIES` is the usual alternative to `verify_interceptors=0`,
+and it does not survive `Rscript`. `Rscript` starts R through a shell script,
+and macOS strips `DYLD_*` variables from any process started from a system
+binary such as `/bin/sh`. The children a test spawns lose them too.
 
 #### Fix the finding, not the flag
 
