@@ -334,10 +334,13 @@ and this job does not use covr.
 
 ### `sanitizers.yml` — UndefinedBehaviorSanitizer
 
-Builds and checks the package under R-devel with clang and UBSan, catching
-signed integer overflow, misaligned pointers, invalid casts and similar. The
-job **halts** on a finding, and verifies with `nm` that the installed shared
-object really is instrumented before running the suite.
+Builds and checks the package under R-devel with UBSan, once with clang and
+once with gcc, using the flags of CRAN's two UBSan flavors. It catches signed
+integer overflow, misaligned pointers, out-of-bounds indexing, invalid casts
+and similar. Every report from every process is collected, including processes
+the tests spawn. The job **fails if there are any**, and lists each distinct
+site with a count, the way CRAN's own logs do. Before running the suite it
+verifies with `nm` that the installed shared object really is instrumented.
 
 ```yaml
 jobs:
@@ -354,9 +357,89 @@ jobs:
     with:
       r-version: devel        # default
       timeout-minutes: 60     # default
+      ubsan-compilers: '["clang", "gcc"]'   # default; one leg each
       env: |                  # extra env for the check step
         MYPKG_SLOW_TESTS=true
 ```
+
+#### How this maps to CRAN's checks
+
+CRAN publishes the exact configuration of its memory-access checks in the
+[memtests README](https://www.stats.ox.ac.uk/pub/bdr/memtests/README.txt).
+A package's check page lists any findings under "Additional issues".
+
+| CRAN flavor | CRAN's flags | here |
+|:--|:--|:--|
+| clang-UBSAN | `-fsanitize=undefined -fno-sanitize=function` | `ubsan (clang)`, same flags, `-O2` |
+| gcc-UBSAN | `-fsanitize=address,undefined,bounds-strict`, `-O2` | `ubsan (gcc)`, same flags without `address`; `asan (gcc-asan)` with it |
+| gcc-ASAN | the same run as gcc-UBSAN | `asan (gcc-asan)` |
+| clang-ASAN | `-fsanitize=address,undefined`, `-O3` | `asan (clang-asan)` |
+| valgrind | `--use-valgrind`, R built with instrumentation level 2 | `valgrind.yml`, on a stock R |
+| [M1-SAN](https://www.stats.ox.ac.uk/pub/bdr/M1-SAN/README.txt) (macOS arm64) | Apple clang, `-fsanitize=address,undefined` | not covered; run it locally, see below |
+
+The two UBSan legs are not redundant. clang treats a trailing array of any
+size as flexible, so it never checks one. gcc's `bounds-strict` checks each
+trailing array against its declared size. The pre-C99 struct hack,
+`T items[1]` allocated larger and indexed past its end, is therefore visible to
+gcc only. Vendored C is full of that pattern.
+
+CRAN never halts on a UBSan report. It prints the report and carries on, then
+reads the logs. This job does the same through UBSan's `log_path`, which gives
+every instrumented process its own report file. Without that, a finding in a
+child process is only as visible as the child's stderr. If a test spawns
+`Rscript` and compares its output, it fails with the diagnostic as the
+"actual" value. If a test discards that output, the finding disappears.
+
+**M1-SAN on your own Mac.** This one matters on its own terms, because arm64
+makes different choices from x86-64: libmdbx's misaligned accesses gave M1-SAN
+three sites where Linux gave five. On Apple silicon with the Command Line
+Tools, point `R_MAKEVARS_USER` at a file containing
+
+```make
+CC=clang -fsanitize=address,undefined -fno-omit-frame-pointer
+CXX=clang++ -fsanitize=address,undefined -fno-omit-frame-pointer
+CXX17=$(CXX)
+CXX20=$(CXX)
+LDFLAGS=-fsanitize=address,undefined -Wl,-rpath,<output of: clang -print-runtime-dir>
+```
+
+and install into a scratch library with `R CMD INSTALL --preclean`. Then run
+the tests with `MallocNanoZone=0`, `UBSAN_OPTIONS=print_stacktrace=1` and
+`ASAN_OPTIONS=verify_interceptors=0:detect_leaks=0`. The last setting is
+needed because CRAN's M1-SAN R is itself built with ASan and yours is not. With
+it, the ASan runtime arrives with your package rather than at launch, so UBSan
+is complete but ASan's heap checks are off. The `asan` containers above cover
+the heap. For mdbx this reproduced M1-SAN's log exactly: the same three sites,
+and the same 1 failed / 987 passed.
+
+`DYLD_INSERT_LIBRARIES` is the usual alternative to `verify_interceptors=0`,
+and it does not survive `Rscript`. `Rscript` starts R through a shell script,
+and macOS strips `DYLD_*` variables from any process started from a system
+binary such as `/bin/sh`. The children a test spawns lose them too.
+
+#### Fix the finding, not the flag
+
+Code that is deliberate by design is where it's most tempting to switch a
+check off: an intentional misaligned load, or an intentional index past the
+end of an array. Don't. CRAN's flags are CRAN's, and a package-side
+`-fno-sanitize=` changes nothing on CRAN's build machines.
+[mdbx](https://github.com/pedrobtz/mdbx) 0.1.0 relaxed UBSan's alignment check
+for its vendored library after measuring one site. CRAN then reported five.
+Look for the library's own switch, or fix the source:
+
+- **Misaligned access.** Many C libraries choose at compile time whether to
+  dereference misaligned pointers directly. They often turn that off only when
+  they detect a sanitizer, and CRAN's builds are not detected. Set the library's
+  switch in `src/Makevars`: for libmdbx this is `-DMDBX_UNALIGNED_OK=0`. The
+  byte-copy paths it enables compile back to single loads at `-O2`.
+- **`index N out of bounds for type 'T [1]'`, gcc only.** This is the struct
+  hack. Declare the array as a true flexible array member, `T items[]`, and
+  add the old element count back wherever `sizeof` measured the header. Where
+  the array sits in a union, where a flexible array member is not allowed,
+  index it through a pointer: `((T *)(void *)p->items)[i]`.
+
+`ubsan-suppressions` and `gcc-ubsan-flags` exist for checks outside CRAN's
+set, not for quieting these.
 
 #### Checking beyond CRAN's UBSan subset
 
@@ -399,13 +482,12 @@ unsigned-integer-overflow:src/hash.c
 implicit-signed-integer-truncation:pack_header
 ```
 
-Two things worth knowing before you turn these on. They are **fatal**, like
-the default set, but by a different route — `-fno-sanitize-recover=undefined`
-does not cover these groups, and `halt_on_error=1` stops the process on one
-anyway. So the run ends at the first finding, and adoption means working
-through them a run at a time. And these are clang spellings: GCC has no such
-groups, so `gcc-asan` skips them rather than failing to build, and says so in
-the log.
+Two things are worth knowing before you turn these on. First, like the
+default set, they fail the job, and one run reports every site at once, so
+adoption means reading one report and writing down the deliberate cases.
+Second, they are clang spellings. GCC has no such groups, so the gcc leg and
+`gcc-asan` skip them rather than failing to build, and say so in the log.
+`gcc-ubsan-flags` is the GCC counterpart.
 
 **Why no ASan here.** ASan instruments a package `.so` fine, but that `.so` is
 `dlopen`'d into an R that is not itself instrumented. Making that work needs
@@ -611,8 +693,8 @@ jobs:
 The scan is not optional extra credit. `R CMD check` does not fail on a
 valgrind finding: valgrind writes to the `.Rout` files, check reads them for R
 errors only, and the job goes green with `definitely lost` in a log nobody
-opens. Valgrind has no equivalent of UBSan's `halt_on_error`, so grepping the
-output is the only way — which is what R-hub's own container scripts do.
+opens. Valgrind writes into the same `.Rout` files as R, so grepping the output
+is the only way, and it is what R-hub's own container scripts do.
 The whole check directory is uploaded as an artifact.
 
 ### `lto.yml` — Link-Time Optimization
