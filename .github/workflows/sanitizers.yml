@@ -31,9 +31,9 @@ on:
       extra-ubsan-checks:
         description: >
           Extra `-fsanitize=` flags for the UBSan build, appended to the ones
-          this workflow already sets. Empty by default. Applies to the
-          `sanitizers` job, and to the `asan` containers whose compiler is
-          clang.
+          this workflow already sets. Empty by default. Applies to the clang
+          leg of the `sanitizers` job, and to the `asan` containers whose
+          compiler is clang.
 
           CRAN runs UBSan as the `undefined` group, and matching the flavor
           that can reject a submission is what the default is for. This is
@@ -60,45 +60,47 @@ on:
 
           These are clang spellings. The `integer`, `implicit-conversion`
           and `local-bounds` groups do not exist in GCC, so this is not
-          applied to a container whose compiler is GCC -- `gcc-asan` would
-          otherwise fail to build rather than fail to check. The job says so
-          when it skips.
+          applied to the gcc leg or to a container whose compiler is GCC --
+          either would otherwise fail to build rather than fail to check. The
+          job says so when it skips.
 
-          Findings from these checks are fatal, like the default set, but by
-          a different route: `-fno-sanitize-recover=undefined` does not cover
-          them, and `halt_on_error=1` in UBSAN_OPTIONS does. The practical
-          consequence is that the run stops at the first one, so adoption
-          means discovering them a run at a time and recording each in
-          `ubsan-suppressions` as you go.
+          Findings from these checks fail the job like the default set, and
+          like the default set they are collected rather than halting at the
+          first: one run lists every site, so adoption means reading one
+          report and recording the deliberate cases in `ubsan-suppressions`.
         type: string
         required: false
         default: ""
       gcc-ubsan-flags:
         description: >
           The GCC counterpart to `extra-ubsan-checks`: flags appended to the
-          sanitizer build on `asan` containers whose compiler is GCC. Empty
-          by default. Spellings are GCC's, and nothing here is applied to a
-          clang container.
+          gcc leg of the `sanitizers` job, and to the sanitizer build on
+          `asan` containers whose compiler is GCC. Empty by default.
+          Spellings are GCC's, and nothing here is applied to clang.
 
           The input above only adds checks, because clang's extra groups are
           all opt-in. This one exists because on GCC the interesting case is
-          the other direction. The `gcc-asan` image compiles packages with
-          `-fsanitize=address,undefined,bounds-strict` from its own Makeconf,
-          and `bounds-strict` is outside the `undefined` group that CRAN
-          runs. What it adds is instrumentation of flexible array members and
-          the `T data[0]` idiom that precedes them -- which every
+          the other direction. The gcc leg and the `gcc-asan` image both
+          compile with `bounds-strict`, which is outside the `undefined`
+          group. What it adds is instrumentation of trailing arrays against
+          their declared size: flexible array members, and the `T data[0]` /
+          `T data[1]` struct hack that precedes them -- which every
           MiniSat-derived solver, and a good deal of vendored C, is built on.
 
-          So a package can fail this job on a construct CRAN's own UBSan
-          never looks at, with no way to say so: `extra-ubsan-checks` is
-          skipped on GCC by design, and the image's flags are not the
-          caller's to set. `-fno-sanitize=bounds-strict` here restores the
-          `undefined` group, which is the flavor that can actually reject a
-          submission.
+          CRAN's gcc-UBSAN flavor compiles with
+          `-fsanitize=address,undefined,bounds-strict`
+          (https://www.stats.ox.ac.uk/pub/bdr/memtests/README.txt), so a
+          `bounds-strict` finding is one CRAN reports too: mdbx 0.1.0 was
+          flagged for `index 1 out of bounds for type 'iovec [1]'`, in
+          vendored code, by exactly this. The fix there was in the source --
+          a true flexible array member (`T data[]`), or indexing through a
+          pointer where the array sits in a union.
 
-          Use it for that, not to quiet a finding that reproduces under
-          plain `-fsanitize=undefined`. Those are real, and the job is doing
-          its job.
+          `-fno-sanitize=bounds-strict` here switches it back off. Use that
+          only for a construct you cannot change and have decided to defend
+          to CRAN, not to quiet a finding that reproduces under plain
+          `-fsanitize=undefined`: those are real, and the job is doing its
+          job.
         type: string
         required: false
         default: ""
@@ -130,6 +132,22 @@ on:
         type: string
         required: false
         default: ""
+      ubsan-compilers:
+        description: >
+          JSON array of compilers for the `sanitizers` job, one leg each.
+          Default `["clang", "gcc"]`, the two UBSan flavors CRAN runs:
+
+              clang  -fsanitize=undefined -fno-sanitize=function
+              gcc    -fsanitize=undefined,bounds-strict
+
+          They find different things. clang treats any trailing array as
+          flexible and never checks one; gcc's bounds-strict checks it
+          against its declared size. `["clang"]` restores the single leg this
+          job had before 1.17.0 -- a narrower check than CRAN's, so prefer
+          fixing what the gcc leg finds.
+        type: string
+        required: false
+        default: '["clang", "gcc"]'
       asan:
         description: >
           Also run the `asan` job below: AddressSanitizer, in the R-hub
@@ -230,43 +248,48 @@ jobs:
   # ASan belongs where the C code links into an actual executable: a fuzz
   # target or a standalone driver. UBSan has no such problem, because its
   # runtime can arrive by DT_NEEDED at dlopen time.
+  #
+  # One leg per compiler, because CRAN runs UBSan twice with different checks
+  # (https://www.stats.ox.ac.uk/pub/bdr/memtests/README.txt):
+  #
+  #   clang   clang-UBSAN   -fsanitize=undefined -fno-sanitize=function
+  #   gcc     gcc-UBSAN     -fsanitize=address,undefined,bounds-strict
+  #
+  # and each sees what the other cannot. gcc's bounds-strict checks a trailing
+  # array against its declared size -- the `T items[1]` struct hack vendored C
+  # is full of -- where clang treats any trailing array as flexible and says
+  # nothing. mdbx 0.1.0 was green here on clang alone and was then reported by
+  # CRAN's gcc-UBSAN for exactly that. The gcc leg is gcc-UBSAN without the
+  # address part, which the asan job below adds.
   sanitizers:
+    name: ubsan (${{ matrix.compiler }})
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: ${{ fromJson(inputs.ubsan-compilers) }}
+
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       R_KEEP_PKG_SOURCE: yes
-      # halt_on_error is not optional. Without it UBSan prints a diagnostic
-      # to stderr and carries on, R CMD check sees a successful run, and the
-      # job is green with findings in the log that nobody reads.
-      # -fno-sanitize-recover=undefined below is the compile-side half of the
-      # same thing.
-      #
-      # It is also what makes anything from extra-ubsan-checks fatal. Those
-      # groups are not part of `undefined`, so the compile-side flag does not
-      # reach them and they are built recoverable; halt_on_error is what stops
-      # the process on one anyway. Set here at the job rather than on the
-      # check step, so it covers R CMD INSTALL too -- installing a package
-      # runs its top-level code, instrumented.
-      UBSAN_OPTIONS: >-
-        print_stacktrace=1:halt_on_error=1${{ inputs.ubsan-suppressions != ''
-          && format(':suppressions={0}/{1}', github.workspace, inputs.ubsan-suppressions)
-          || '' }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      # libomp-dev is not optional for an OpenMP package. R's Makeconf
+      # puts -fopenmp in SHLIB_OPENMP_CFLAGS whatever the compiler, and
+      # the clang leg overrides CC to clang -- which, unlike gcc with its
+      # bundled libgomp, needs libomp installed separately. Without it a
+      # package whose src/Makevars forwards SHLIB_OPENMP_CFLAGS fails to
+      # build before UBSan observes anything: first `omp.h file not
+      # found`, then `cannot find -lomp` at link. The asan job below does
+      # not need this because its r-hub containers already ship it.
+      - name: Install clang
+        if: matrix.compiler == 'clang'
         run: |
           sudo apt-get update
-          # libomp-dev is not optional for an OpenMP package. R's Makeconf
-          # puts -fopenmp in SHLIB_OPENMP_CFLAGS whatever the compiler, and
-          # this job overrides CC to clang -- which, unlike gcc with its
-          # bundled libgomp, needs libomp installed separately. Without it a
-          # package whose src/Makevars forwards SHLIB_OPENMP_CFLAGS fails to
-          # build before UBSan observes anything: first `omp.h file not
-          # found`, then `cannot find -lomp` at link. The asan job below does
-          # not need this because its r-hub containers already ship it.
           sudo apt-get install -y clang libomp-dev
 
       - uses: r-lib/actions/setup-r@v2
@@ -278,6 +301,41 @@ jobs:
         with:
           extra-packages: any::rcmdcheck
           needs: check
+
+      # Reports are collected, not fatal at the first one.
+      #
+      # This job used to set halt_on_error=1, on the reasoning that UBSan
+      # otherwise prints and carries on and R CMD check comes back green with
+      # the findings unread. That reasoning holds; the cure was the wrong one.
+      # A run that stops at the first finding shows one site per run, where
+      # CRAN -- which never halts -- lists them all at once. And a finding in a
+      # child process is only as visible as that child's stderr: a test that
+      # spawns Rscript and compares its output fails with a UBSan diagnostic
+      # as the "actual" value, and one that discards the output hides it.
+      #
+      # log_path sends every report from every instrumented process --
+      # R CMD INSTALL, the examples, the tests and anything they spawn -- to
+      # its own file, ubsan.<pid>. The build stays recoverable, so the whole
+      # suite runs, and the last step fails the job if any file exists. That
+      # is the same gate halt_on_error was, with nothing able to swallow it.
+      #
+      # Set in $GITHUB_ENV here rather than at the job, because the job's
+      # `env` cannot see $RUNNER_TEMP, and before the first instrumented
+      # process: installing a package runs its top-level code.
+      - name: Configure UBSan reporting
+        env:
+          SUPPRESSIONS: ${{ inputs.ubsan-suppressions }}
+        run: |
+          set -euo pipefail
+          reports="${RUNNER_TEMP}/ubsan-reports"
+          mkdir -p "$reports"
+          opts="print_stacktrace=1:log_path=${reports}/ubsan"
+          if [ -n "$SUPPRESSIONS" ]; then
+            opts="${opts}:suppressions=${GITHUB_WORKSPACE}/${SUPPRESSIONS}"
+          fi
+          echo "UBSAN_REPORTS=${reports}" >> "$GITHUB_ENV"
+          echo "UBSAN_OPTIONS=${opts}" >> "$GITHUB_ENV"
+          echo "UBSAN_OPTIONS=${opts}"
 
       # These MUST go in ~/.R/Makevars, not the environment.
       #
@@ -291,29 +349,69 @@ jobs:
       # .so with no runtime fail at load with `undefined symbol: __ubsan_*`.
       # clang links no sanitizer runtime into a -shared output by default, so
       # -shared-libsan plus an rpath to the runtime directory is what lets
-      # the .so resolve it at dlopen time.
+      # the .so resolve it at dlopen time. gcc links libubsan into a -shared
+      # output as a DT_NEEDED on its own.
       #
-      # extra-ubsan-checks is appended to the compile flags only. The link
-      # step already carries -fsanitize=undefined and -shared-libsan, and the
-      # additional groups are handled by that same libubsan, so they need
-      # nothing further to resolve at dlopen time.
+      # The flags are CRAN's, per compiler. -fno-sanitize=function is on
+      # CRAN's clang line: clang 17 extended that check to C, where it
+      # reports any call through a function pointer cast to another type --
+      # a pattern R's routine registration and a good deal of package code
+      # rely on. gcc has no such check. -O2 rather than -O1 because it is
+      # what CRAN compiles at, and inlining decides which function a report
+      # names and whether a site is reached through a path the optimiser
+      # kept, so matching the level is what makes a report here read like
+      # CRAN's.
+      #
+      # The extra flags go to the compile flags only. The link step already
+      # carries -fsanitize=undefined, and the additional groups are handled
+      # by that same runtime, so they need nothing further at dlopen time.
       - name: Configure sanitizer flags
         env:
-          EXTRA_CHECKS: ${{ inputs.extra-ubsan-checks }}
+          COMPILER: ${{ matrix.compiler }}
+          CLANG_EXTRA: ${{ inputs.extra-ubsan-checks }}
+          GCC_EXTRA: ${{ inputs.gcc-ubsan-flags }}
         run: |
           set -euo pipefail
-          RTLIB="$(clang -print-runtime-dir)"
-          BASE="-g -O1 -fsanitize=undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+          case "$COMPILER" in
+            clang)
+              CC=clang CXX=clang++
+              BASE="-g -O2 -fsanitize=undefined -fno-sanitize=function -fno-omit-frame-pointer"
+              EXTRA="$CLANG_EXTRA"
+              LINK="-fsanitize=undefined -shared-libsan -Wl,-rpath,$(clang -print-runtime-dir)"
+              if [ -n "$GCC_EXTRA" ]; then
+                echo "::notice::gcc-ubsan-flags skipped on the clang leg: these are GCC spellings"
+              fi
+              ;;
+            gcc)
+              CC=gcc CXX=g++
+              BASE="-g -O2 -fsanitize=undefined,bounds-strict -fno-omit-frame-pointer"
+              EXTRA="$GCC_EXTRA"
+              LINK="-fsanitize=undefined"
+              # GCC has no `integer`, `implicit-conversion` or `local-bounds`
+              # group, so these would end the build at the first translation
+              # unit with "unrecognized argument". Skipped, and said out loud:
+              # a check that silently did not run is worse than one that did
+              # not exist.
+              if [ -n "$CLANG_EXTRA" ]; then
+                echo "::notice::extra-ubsan-checks skipped on the gcc leg: these checks are clang-only"
+              fi
+              ;;
+            *)
+              echo "::error::ubsan-compilers: unknown compiler '${COMPILER}' (expected clang or gcc)"
+              exit 1
+              ;;
+          esac
+          FLAGS="${BASE}${EXTRA:+ ${EXTRA}}"
           mkdir -p ~/.R
           {
-            echo "CC = clang"
-            echo "CXX = clang++"
-            echo "CFLAGS = ${BASE} ${EXTRA_CHECKS}"
-            echo "CXXFLAGS = ${BASE} ${EXTRA_CHECKS}"
+            echo "CC = ${CC}"
+            echo "CXX = ${CXX}"
+            echo "CFLAGS = ${FLAGS}"
+            echo "CXXFLAGS = ${FLAGS}"
             # A package declaring CXX_STD is compiled with $(CXXnn) and
             # $(CXXnnFLAGS), not $(CXX)/$(CXXFLAGS). Setting only the latter
             # leaves such a package compiled by the image's g++ with no
-            # instrumentation, and then linked with the clang-only LDFLAGS
+            # instrumentation, and then linked with the sanitizer LDFLAGS
             # below -- the same "passes without checking anything" failure the
             # comment above describes, one variable over.
             #
@@ -329,27 +427,22 @@ jobs:
             # with the standard coming from the untouched CXX20STD.
             for std in 11 14 17 20 23 26; do
               [ -n "$(R CMD config CXX${std} 2>/dev/null || true)" ] || continue
-              echo "CXX${std} = clang++"
-              echo "CXX${std}FLAGS = ${BASE} ${EXTRA_CHECKS}"
+              echo "CXX${std} = ${CXX}"
+              echo "CXX${std}FLAGS = ${FLAGS}"
             done
             # C has no per-standard compiler variable -- it always uses
             # $(CC), set above -- but it does have per-standard flags, and a
             # package declaring C_STD would otherwise compile uninstrumented.
             for std in 90 99 17 23; do
-              echo "C${std}FLAGS = ${BASE} ${EXTRA_CHECKS}"
+              echo "C${std}FLAGS = ${FLAGS}"
             done
-            echo "LDFLAGS = -fsanitize=undefined -shared-libsan -Wl,-rpath,${RTLIB}"
+            echo "LDFLAGS = ${LINK}"
           } >> ~/.R/Makevars
           echo "--- ~/.R/Makevars ---"
           cat ~/.R/Makevars
+          echo "--- ${CC} ---"
+          "$CC" --version | head -1
 
-      # Verify the detector actually got built in, rather than trusting that
-      # passing a flag made it so. This checks the *installed* .so, not the
-      # build log: the log records the command that was meant to produce the
-      # object, which is exactly what was wrong before.
-      #
-      # A package with no compiled code has nothing to instrument, and says
-      # so rather than failing.
       # Before anything runs instrumented, because the failure this prevents
       # is not a clear one: UBSan aborts the process it could not read the
       # file in, and during a check that surfaces as a test dying with no
@@ -367,6 +460,13 @@ jobs:
           echo "--- ${SUPPRESSIONS} ---"
           cat "${GITHUB_WORKSPACE}/${SUPPRESSIONS}"
 
+      # Verify the detector actually got built in, rather than trusting that
+      # passing a flag made it so. This checks the *installed* .so, not the
+      # build log: the log records the command that was meant to produce the
+      # object, which is exactly what was wrong before.
+      #
+      # A package with no compiled code has nothing to instrument, and says
+      # so rather than failing.
       - name: Install and verify instrumentation
         run: |
           set -euo pipefail
@@ -419,6 +519,49 @@ jobs:
             build_args = c("--no-manual"),
             error_on = "warning"
           )
+
+      # The gate. Runs whether or not the check passed: a finding that also
+      # broke a test should still be reported as the finding, not only as
+      # the test.
+      #
+      # Addresses are masked before counting, so one site reached a thousand
+      # times is one line with a count -- the shape of CRAN's own reports.
+      - name: Fail on UBSan reports
+        if: always()
+        run: |
+          # Not -e: grep finding nothing is an answer here, not an error.
+          set +e -u
+          shopt -s nullglob
+          reports=("${UBSAN_REPORTS}"/ubsan.*)
+          if [ "${#reports[@]}" -eq 0 ]; then
+            echo "No UBSan reports."
+            exit 0
+          fi
+          sites=$(grep -h 'runtime error:' "${reports[@]}" \
+                    | sed -E 's/0x[0-9a-f]+/0x…/g' | sort | uniq -c | sort -rn)
+          nsites=$(printf '%s\n' "$sites" | grep -c .)
+          echo "### UBSan (${{ matrix.compiler }}): ${nsites} distinct site(s) in ${#reports[@]} process(es)" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo '```'; printf '%s\n' "$sites"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$sites"
+          for f in "${reports[@]}"; do
+            echo "::group::$(basename "$f")"
+            cat "$f"
+            echo "::endgroup::"
+          done
+          if [ "$nsites" -eq 0 ]; then
+            echo "::error::UBSan wrote ${#reports[@]} report file(s) with no 'runtime error:' line; see the ubsan-${{ matrix.compiler }} artifact"
+          else
+            echo "::error::UBSan reported ${nsites} distinct site(s); see the step summary and the ubsan-${{ matrix.compiler }} artifact"
+          fi
+          exit 1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ubsan-${{ matrix.compiler }}
+          path: ${{ runner.temp }}/ubsan-reports
+          if-no-files-found: ignore
 
   # AddressSanitizer, in the R-hub containers -- which is the one place it
   # works for an R package, and the reason the job above does not attempt it.
@@ -690,9 +833,12 @@ jobs:
       - name: Run under the sanitizer
         env:
           R_LIBS: ${{ github.workspace }}/lib
-          # No halt_on_error here, unlike the runner job: this job reads the
+          # No halt_on_error here, as in the runner job: this job reads the
           # log afterwards instead, and "runtime error:" in that pattern is
-          # what makes a finding from extra-ubsan-checks fail the job.
+          # what makes a UBSan finding fail the job. Not log_path, unlike the
+          # runner job: here UBSan runs inside the ASan runtime, log_path is a
+          # flag the two share, and moving ASan's reports out of this log is a
+          # change to try on its own rather than as a side effect.
           UBSAN_OPTIONS: >-
             print_stacktrace=1${{ inputs.ubsan-suppressions != ''
               && format(':suppressions={0}/{1}', github.workspace, inputs.ubsan-suppressions)
