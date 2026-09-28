@@ -361,16 +361,27 @@ jobs:
       # packaged for R and served from the repository CRAN's README names
       # for it. A private library, so neither lands among the package's own
       # dependencies.
+      #
+      # From the repos setup-r configured, which on Linux serve binaries.
+      # Naming CRAN's source repository instead built W3CMarkupValidator's
+      # `curl` dependency from source, which needs libcurl headers the
+      # runner does not ship -- the first run of this job failed on
+      # `curl/curl.h: No such file or directory`. The headers are installed
+      # as well, for the case where no binary exists for this R.
       - name: Install the validator
         run: |
           set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libcurl4-openssl-dev
           LIB="${RUNNER_TEMP}/vnu-lib"
           mkdir -p "$LIB"
           echo "VNU_LIB=${LIB}" >> "$GITHUB_ENV"
           Rscript -e '
             lib <- Sys.getenv("LIB")
-            install.packages("W3CMarkupValidator", lib = lib, repos = "https://cloud.r-project.org")
+            install.packages("W3CMarkupValidator", lib = lib)
             install.packages("vnu.jar", lib = lib, type = "source", repos = "https://datacube.wu.ac.at/")
+            for (p in c("W3CMarkupValidator", "vnu.jar"))
+              if (!requireNamespace(p, lib.loc = lib, quietly = TRUE)) stop("failed to install ", p)
           '
         env:
           LIB: ${{ runner.temp }}/vnu-lib
