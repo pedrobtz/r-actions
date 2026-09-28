@@ -1295,3 +1295,16 @@ jobs:
   gctorture:
     uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@v1
 ```
+
+## References
+
+CRAN pages that define what these workflows reproduce.
+
+- [Check flavors](https://cran.r-project.org/web/checks/check_flavors.html) —
+  the platforms, compilers and R versions of CRAN's regular checks.
+- [Check issue kinds](https://cran.r-project.org/web/checks/check_issue_kinds.html)
+  — the "Additional issues" CRAN reports beyond the regular flavors, such as
+  ASAN, UBSAN, valgrind, rchk, LTO, `noLD`, `M1mac` and `musl`, each linking
+  to the packages currently affected.
+- [memtests README](https://www.stats.ox.ac.uk/pub/bdr/memtests/README.txt) —
+  the exact configuration of CRAN's memory-access checks.
