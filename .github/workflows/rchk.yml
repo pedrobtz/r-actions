@@ -1,6 +1,19 @@
 on:
   workflow_call:
     inputs:
+      skip-docs-only:
+        description: >
+          Skip every job here when a push or pull request changes
+          documentation only: Markdown at the top level or under a dot
+          directory (`.github/`, `.agents/`), `_pkgdown.yml`, and `pkgdown/`.
+          Anything else runs as before, `man/`, `vignettes/` and the `.md`
+          snapshots under `tests/` included. So does every case where the
+          changed files cannot be listed: a new branch, a force-push, an API
+          failure, a manual or scheduled run. See "Documentation-only
+          changes" in the README.
+        type: boolean
+        required: false
+        default: true
       fail-on-findings:
         description: >
           Fail the job when rchk reports anything, instead of warning and
@@ -71,7 +84,101 @@ permissions:
   contents: read
 
 jobs:
+  # Skips the jobs below when a push or pull request changes documentation
+  # only; see the `skip-docs-only` input. Every workflow it gates carries an
+  # identical copy -- inline for the reason sanitizers.yml gives for not
+  # factoring out a composite action -- and tests/lint-workflows.py keeps the
+  # copies identical and the wiring complete.
+  #
+  # The gated jobs test `!cancelled()` in place of the implicit `success()`,
+  # so this job failing, or being skipped, runs them rather than dropping
+  # them. Only an explicit `docs-only=true` skips anything.
+  changes:
+    name: docs-only gate
+    if: inputs.skip-docs-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs-only: ${{ steps.classify.outputs.docs-only }}
+    steps:
+      - name: Classify the changed files
+        id: classify
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          FORCED: ${{ github.event.forced }}
+        run: |
+          # Anything short of a complete list of changed files, every one of
+          # them documentation, leaves this false and every job runs.
+          docs_only=false
+          trap 'echo "docs-only=$docs_only" >> "$GITHUB_OUTPUT"' EXIT
+
+          case "$EVENT" in
+            pull_request|pull_request_target)
+              base=$PR_BASE head=$PR_HEAD ;;
+            push)
+              # `before` is all zeros for a new branch, and after a
+              # force-push it may no longer exist.
+              if [ "$FORCED" = true ] || [ -z "${BEFORE//0/}" ]; then
+                echo "New branch or force-push: no diff to go by, so everything runs."
+                exit 0
+              fi
+              base=$BEFORE head=$AFTER ;;
+            *)
+              echo "A $EVENT run has no changed files to go by, so everything runs."
+              exit 0 ;;
+          esac
+
+          # The compare API rather than the pull request's file list, which
+          # would need `pull-requests: read`: a scope the caller may not hold,
+          # and asking for one is a startup_failure. Three dots diff from the
+          # merge base, which for a pull request is exactly what it changes,
+          # from its first commit on.
+          if ! files=$(gh api "repos/$REPO/compare/$base...$head" \
+                         --jq '(.files // []) | length, .[].filename'); then
+            echo "Could not list the changed files, so everything runs."
+            exit 0
+          fi
+
+          # compare lists at most 300 files and truncates silently past that.
+          count=$(head -n 1 <<<"$files")
+          if ! [[ $count =~ ^[0-9]+$ ]] || [ "$count" -eq 0 ] || [ "$count" -ge 300 ]; then
+            echo "Cannot rely on a list of '$count' changed files, so everything runs."
+            exit 0
+          fi
+
+          # Markdown in `tests/` is not documentation -- testthat snapshots
+          # and fixtures are .md -- and neither is Markdown under `fuzz/` or
+          # `inst/`, so .md counts only at the top level or under a dot
+          # directory, which a package does not ship.
+          all_docs=true
+          while IFS= read -r f; do
+            case "$f" in
+              _pkgdown.yml|_pkgdown.yaml|pkgdown/*) kind=docs ;;
+              .*/*.md) kind=docs ;;
+              */*) kind=code ;;
+              *.md) kind=docs ;;
+              *) kind=code ;;
+            esac
+            printf '%-5s %s\n' "$kind" "$f"
+            [ "$kind" = docs ] || all_docs=false
+          done < <(tail -n +2 <<<"$files")
+
+          if [ "$all_docs" = true ]; then
+            docs_only=true
+            echo "Documentation only: the jobs in this workflow are skipped." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
   rchk:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs-only != 'true' }}
     runs-on: ubuntu-latest
 
     steps:

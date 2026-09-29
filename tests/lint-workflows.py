@@ -19,11 +19,59 @@ WRITERS = {
     "vendor-upstream.yml": {"contents": "read", "issues": "write"},
 }
 
+# Workflows whose jobs a documentation-only change skips, through an identical
+# `changes` job in each, and the reusable workflows that deliberately run
+# anyway. A new reusable workflow must be put in one or the other.
+GATED = {
+    "alloc-failure.yml", "analyzers.yml", "arch.yml", "cran-special.yml",
+    "fuzz.yml", "gctorture.yml", "lto.yml", "r-cmd-check.yml", "rchk.yml",
+    "sanitizers.yml", "valgrind.yml",
+}
+UNGATED = {
+    "coverage.yml": "its job summary and badge are wanted on every change",
+    "vendor.yml": "it matches its own paths and takes seconds",
+    "vendor-upstream.yml": "it runs on a schedule, where there is no diff",
+}
+GATE = "${{ !cancelled() && needs.changes.outputs.docs-only != 'true'"
+
 failures = []
+changes_jobs = {}
 
 
 def fail(workflow, message):
     failures.append(f"{workflow}: {message}")
+
+
+def check_gate(name, doc, call):
+    """The skip-docs-only input, the `changes` job, and every job wired to it.
+
+    A job missing `needs: changes` runs on documentation changes, which is
+    only wasteful; one with `needs` but the plain implicit `success()` is
+    skipped whenever the gate itself fails, which drops real checks. Both are
+    one forgotten line in a copy of a copy, so they are checked here.
+    """
+    inputs = (call or {}).get("inputs") or {}
+    spec = inputs.get("skip-docs-only")
+    if not isinstance(spec, dict) or spec.get("type") != "boolean" \
+            or spec.get("default") is not True:
+        fail(name, "needs a `skip-docs-only` boolean input defaulting to true")
+
+    jobs = doc["jobs"]
+    if "changes" not in jobs:
+        fail(name, "is gated but has no `changes` job")
+        return
+    changes_jobs[name] = jobs["changes"]
+
+    for job, body in jobs.items():
+        if job == "changes" or not isinstance(body, dict):
+            continue
+        needs = body.get("needs")
+        needs = [needs] if isinstance(needs, str) else (needs or [])
+        if "changes" not in needs:
+            fail(name, f"job `{job}` does not `needs: changes`")
+        if not str(body.get("if", "")).startswith(GATE):
+            fail(name, f"job `{job}` must start its `if:` with `{GATE}`, "
+                       f"so a failed or skipped gate runs it")
 
 
 RANK = {"none": 0, "read": 1, "write": 2}
@@ -81,6 +129,12 @@ for path in sorted(WORKFLOWS.glob("*.yml")):
                        f"reusable workflow shares the caller's group names, "
                        f"so put it in the caller")
 
+        if name in GATED:
+            check_gate(name, doc, triggers["workflow_call"])
+        elif name not in UNGATED:
+            fail(name, "is in neither GATED nor UNGATED; decide whether a "
+                       "documentation-only change should skip it")
+
     perms = permissions_of(doc)
 
     # A reusable workflow cannot be granted more than its caller holds, and a
@@ -112,6 +166,18 @@ for path in sorted(WORKFLOWS.glob("*.yml")):
         fail(name, f"permissions {perms} do not match the declared "
                    f"expectation {expected}")
 
+for name in sorted((GATED | set(UNGATED)) - {p.name for p in WORKFLOWS.glob("*.yml")}):
+    fail(name, "is listed in GATED or UNGATED but does not exist")
+
+# The copies must not drift: a fix made to one gate and not the others is
+# exactly the kind of difference nobody notices until it matters.
+if changes_jobs:
+    reference, body = min(changes_jobs.items())
+    for name, other in sorted(changes_jobs.items()):
+        if other != body:
+            fail(name, f"its `changes` job differs from {reference}'s; keep "
+                       f"every copy identical")
+
 if failures:
     print("Workflow invariants violated:\n", file=sys.stderr)
     for f in failures:
@@ -119,4 +185,5 @@ if failures:
     sys.exit(1)
 
 count = len(list(WORKFLOWS.glob("*.yml")))
-print(f"{count} workflows: permissions are explicit, least-privilege and match WRITERS; no reusable workflow declares concurrency.")
+print(f"{count} workflows: permissions are explicit, least-privilege and match WRITERS; no reusable workflow declares concurrency; "
+      f"{len(changes_jobs)} carry an identical, fully wired docs-only gate.")

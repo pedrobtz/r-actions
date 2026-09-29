@@ -1179,9 +1179,10 @@ base, not the branch alone. Across three packages that second run was 28 to
 | `valgrind.yml` | skipped | runs |
 | `cran-special.yml` | skipped | `rcnst`, `rlibro` and `vnu` |
 
-The caller picks the profile. Nothing here reads the event for itself, and a
-caller that passes nothing gets the workflow it had before this input
-existed. The examples pass:
+The caller picks the profile, and a caller that passes nothing gets the
+workflow it had before this input existed. (The one thing here that reads the
+event for itself is the documentation-only gate, [below](#documentation-only-changes).)
+The examples pass:
 
 ```yaml
     with:
@@ -1226,6 +1227,66 @@ called workflow `github.workflow` and `github.ref` are the *caller's*, so a
 group written there names the caller's own group — which GitHub cancels as a
 deadlock — and the group of every sibling call in the same file.
 `tests/lint-workflows.py` fails on a reusable workflow that declares one.
+
+### Documentation-only changes
+
+A push or pull request that changes documentation only skips every job in
+r-cmd-check, sanitizers, valgrind, lto, gctorture, rchk, analyzers,
+cran-special, arch, fuzz and alloc-failure. Each shows as *skipped*, which
+GitHub counts as passing for a required check. coverage, vendor and
+vendor-upstream run regardless, and so does the caller's own pkgdown workflow.
+
+Documentation means, and only means:
+
+| Counts | Why |
+|---|---|
+| `*.md` at the top level — README, NEWS, cran-comments | nothing checked here reads it; the checks run with `_R_CHECK_CRAN_INCOMING_=false`, so not even the URL checks do |
+| `*.md` under a dot directory — `.github/`, `.agents/` | a package does not ship its dot directories |
+| `_pkgdown.yml`, `pkgdown/` | read by pkgdown alone |
+
+Everything else runs, including files that look like documentation and are
+not:
+
+- `man/` — R CMD check validates the Rd and runs the examples.
+- `vignettes/` — R CMD check rebuilds them.
+- `R/` — a roxygen comment and the code under it are one file, and no path
+  filter can tell an edit to one from an edit to the other.
+- `tests/**/*.md` — testthat snapshots and fixtures are Markdown the tests
+  read. So is anything under `fuzz/` or `inst/`, which is why Markdown counts
+  only at the top level and in dot directories rather than anywhere.
+
+A pull request is compared with its base from its first commit — the diff is
+the whole pull request against the merge base, not the latest push — so once
+a pull request changes any code, every later push to it runs in full, even
+one that only fixes a README typo. A push to main is compared with the commit
+it replaced.
+
+When there is any doubt, everything runs. A new branch, a force-push, a
+`workflow_dispatch` or `schedule` run, a failed API call, and a change of 300
+files or more (where the compare API truncates without saying so) all run the
+full workflow. The gated jobs test `!cancelled()` rather than the implicit
+`success()`, so even the gate failing outright runs them: a bug in it can cost
+runner time but cannot drop a check.
+
+The gate is a `changes` job of about ten seconds at the top of each workflow.
+It lists the changed files through the compare API, which needs only
+`contents: read` — the pull request's file list would need `pull-requests:
+read`, which a caller need not hold, and a reusable workflow asking for more
+than its caller holds is a `startup_failure`. Its log lists every changed file
+as `docs` or `code`, and a skip says so in the job summary.
+
+It is on by default, so every caller gets it when `v1` moves. To always run:
+
+```yaml
+    with:
+      skip-docs-only: false
+```
+
+Each workflow carries its own copy of the job, inline for the reason
+sanitizers.yml gives for not factoring out a composite action.
+`tests/lint-workflows.py` keeps the copies identical, fails on a job not
+wired to the gate, and fails on a new reusable workflow that is not declared
+either gated or deliberately ungated.
 
 ### R CMD check
 
