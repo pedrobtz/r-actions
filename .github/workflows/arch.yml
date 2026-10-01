@@ -83,12 +83,17 @@ on:
           would have to be built first on a platform it publishes no binary
           for.
 
+          The default reads DESCRIPTION itself. It used to ask
+          tools::package_dependencies(".") with the installed packages as its
+          database, where "." is not a package, so it found and installed
+          nothing -- and tests guarded by requireNamespace() skipped quietly.
+
           Set to "" for a package with no dependencies, which is the case this
           runs fastest in and the case a vendored-C package is often in.
         type: string
         required: false
         default: >-
-          Rscript -e 'if (length(rd <- setdiff(unlist(tools::package_dependencies(".", db = installed.packages(), which = "most")), rownames(installed.packages())))) install.packages(rd, repos = "https://cloud.r-project.org")'
+          Rscript -e 'd <- read.dcf("DESCRIPTION"); f <- intersect(c("Depends", "Imports", "LinkingTo", "Suggests"), colnames(d)); p <- trimws(sub("[(].*", "", unlist(strsplit(d[1, f], ",")))); rd <- setdiff(p[nzchar(p)], c("R", rownames(installed.packages()))); if (length(rd)) install.packages(rd, repos = "https://cloud.r-project.org")'
       check-args:
         description: >
           Arguments to R CMD check inside the container.
@@ -207,8 +212,11 @@ jobs:
           # and asking for one is a startup_failure. Three dots diff from the
           # merge base, which for a pull request is exactly what it changes,
           # from its first commit on.
+          # A rename is listed under its new name, with the old one in
+          # previous_filename; both count, or `git mv R/x.R x.md` reads as a
+          # documentation-only change.
           if ! files=$(gh api "repos/$REPO/compare/$base...$head" \
-                         --jq '(.files // []) | length, .[].filename'); then
+                         --jq '(.files // []) | length, (.[] | .filename, (.previous_filename // empty))'); then
             echo "Could not list the changed files, so everything runs."
             exit 0
           fi
