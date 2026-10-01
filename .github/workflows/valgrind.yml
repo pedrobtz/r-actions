@@ -146,8 +146,11 @@ jobs:
           # and asking for one is a startup_failure. Three dots diff from the
           # merge base, which for a pull request is exactly what it changes,
           # from its first commit on.
+          # A rename is listed under its new name, with the old one in
+          # previous_filename; both count, or `git mv R/x.R x.md` reads as a
+          # documentation-only change.
           if ! files=$(gh api "repos/$REPO/compare/$base...$head" \
-                         --jq '(.files // []) | length, .[].filename'); then
+                         --jq '(.files // []) | length, (.[] | .filename, (.previous_filename // empty))'); then
             echo "Could not list the changed files, so everything runs."
             exit 0
           fi

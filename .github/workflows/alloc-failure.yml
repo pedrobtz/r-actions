@@ -77,14 +77,20 @@ on:
         default: 300
       expect-pattern:
         description: >
-          Extended regular expression the output must match when an
-          allocation has been failed.
+          Extended regular expression the output must match when a run with
+          an allocation failed exits non-zero.
 
-          Surviving the failure is necessary and not sufficient: a package
-          that swallows the error and returns a truncated document has not
-          crashed and has not behaved. Setting this to the error the package
-          is supposed to raise turns the sweep into a check that the failure
-          surfaces as a condition rather than as silence.
+          Surviving the failure is necessary and not sufficient: a run that
+          dies of it should say why. Setting this to the error the package is
+          supposed to raise turns the sweep into a check that the failure
+          surfaces as that condition rather than as some unrelated error.
+
+          Runs that exit 0 are not checked against it. Only one allocation is
+          failed per run, and R retries a failed allocation after a garbage
+          collection, so a clean exit usually means the failure was absorbed
+          -- not that the package hid it. A package that swallows the error
+          and returns a truncated result is something only the workload can
+          catch, by checking its own result.
 
               expect-pattern: "cannot allocate|memory exhausted"
 
@@ -197,8 +203,11 @@ jobs:
           # and asking for one is a startup_failure. Three dots diff from the
           # merge base, which for a pull request is exactly what it changes,
           # from its first commit on.
+          # A rename is listed under its new name, with the old one in
+          # previous_filename; both count, or `git mv R/x.R x.md` reads as a
+          # documentation-only change.
           if ! files=$(gh api "repos/$REPO/compare/$base...$head" \
-                         --jq '(.files // []) | length, .[].filename'); then
+                         --jq '(.files // []) | length, (.[] | .filename, (.previous_filename // empty))'); then
             echo "Could not list the changed files, so everything runs."
             exit 0
           fi
@@ -298,12 +307,21 @@ jobs:
           static char   arena[1 << 16];
           static size_t arena_used = 0;
 
+          /* Each block carries its size in a 16-byte header, so a realloc
+             out of the arena copies what the block held -- not the new
+             size, which read past it, and past the arena at its end. */
           static void *arena_alloc(size_t n) {
-            size_t a = (n + 15u) & ~(size_t)15u;
+            if (n > sizeof arena) return NULL;
+            size_t a = 16u + ((n + 15u) & ~(size_t)15u);
             if (arena_used + a > sizeof arena) return NULL;
-            void *p = arena + arena_used;
+            char *p = arena + arena_used;
             arena_used += a;
-            return p;
+            *(size_t *)p = n;
+            return p + 16;
+          }
+
+          static size_t arena_size(void *p) {
+            return *(size_t *)((char *)p - 16);
           }
 
           static int from_arena(void *p) {
@@ -340,6 +358,7 @@ jobs:
 
           void *calloc(size_t nmemb, size_t size) {
             if (resolving || !real_calloc) {
+              if (size && nmemb > (size_t)-1 / size) return NULL;
               void *p = arena_alloc(nmemb * size);
               if (!resolving) init();
               if (p) memset(p, 0, nmemb * size);
@@ -354,7 +373,10 @@ jobs:
             init();
             if (from_arena(ptr)) {
               void *p = malloc(size);
-              if (p && ptr) memcpy(p, ptr, size);
+              if (p) {
+                size_t old = arena_size(ptr);
+                memcpy(p, ptr, old < size ? old : size);
+              }
               return p;
             }
             if (!real_realloc) return arena_alloc(size);
@@ -398,9 +420,19 @@ jobs:
 
           ALLOC_COUNT_FILE="${GITHUB_WORKSPACE}/floor.count" \
             sh -c "$BASELINE_COMMAND" >/dev/null 2>&1 || true
+          # The uninjected run has to succeed: a typo in `run`, or a package
+          # that does not load, otherwise allocated next to nothing, swept no
+          # positions and reported "all handled".
+          status=0
           ALLOC_COUNT_FILE="${GITHUB_WORKSPACE}/total.count" \
-            sh -c "$RUN_COMMAND" >/dev/null 2>&1 || true
+            sh -c "$RUN_COMMAND" > run.log 2>&1 || status=$?
           unset LD_PRELOAD
+
+          if [ "$status" -ne 0 ]; then
+            echo "::error::\`run\` fails with no allocation failed (exit ${status}); fix the workload first"
+            sed -n '1,40p' run.log
+            exit 1
+          fi
 
           floor=$(cat floor.count 2>/dev/null || echo 0)
           total=$(cat total.count 2>/dev/null || echo 0)
@@ -414,8 +446,8 @@ jobs:
           end="$total"
           if [ "$end" -gt $((floor + CAP)) ]; then end=$((floor + CAP)); fi
           if [ "$start" -gt "$end" ]; then
-            echo "::warning::the workload allocated nothing beyond interpreter startup"
-            start=0; end=0
+            echo "::error::the workload allocated nothing beyond interpreter startup, so there is nothing to sweep"
+            exit 1
           fi
 
           echo "floor=${floor}" >> "$GITHUB_OUTPUT"

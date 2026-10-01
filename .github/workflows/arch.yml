@@ -55,6 +55,12 @@ on:
           The default covers the two legs with the best ratio -- 32-bit and
           musl -- and both of them run without emulation on an x86-64 runner.
 
+          Each default setup installs the system headers testthat's own
+          dependencies compile against: libuv for fs, and on Alpine the kernel
+          headers for ps. Without them testthat could not be built, so a suite
+          guarded by requireNamespace("testthat") was skipped on every leg.
+          Add your package's own system libraries to `setup`.
+
           aarch64 is deliberately not in the default. It is worth having, and
           it is also the platform a large part of the world now develops on,
           so its bugs tend to be found already -- and it is the leg that
@@ -62,16 +68,16 @@ on:
 
               {"name": "aarch64", "platform": "linux/arm64",
                "image": "arm64v8/debian:bookworm",
-               "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev"}
+               "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev libuv1-dev"}
         type: string
         required: false
         default: >-
           [{"name": "i386", "platform": "linux/386",
             "image": "i386/debian:bookworm",
-            "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev"},
+            "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev libuv1-dev"},
            {"name": "musl", "platform": "linux/amd64",
             "image": "alpine:3.21",
-            "setup": "apk add --no-cache R R-dev R-doc build-base"}]
+            "setup": "apk add --no-cache R R-dev R-doc build-base linux-headers libuv-dev"}]
       install-dependencies:
         description: >
           Command run inside the container to install the package's
@@ -83,12 +89,17 @@ on:
           would have to be built first on a platform it publishes no binary
           for.
 
+          The default reads DESCRIPTION itself. It used to ask
+          tools::package_dependencies(".") with the installed packages as its
+          database, where "." is not a package, so it found and installed
+          nothing -- and tests guarded by requireNamespace() skipped quietly.
+
           Set to "" for a package with no dependencies, which is the case this
           runs fastest in and the case a vendored-C package is often in.
         type: string
         required: false
         default: >-
-          Rscript -e 'if (length(rd <- setdiff(unlist(tools::package_dependencies(".", db = installed.packages(), which = "most")), rownames(installed.packages())))) install.packages(rd, repos = "https://cloud.r-project.org")'
+          Rscript -e 'd <- read.dcf("DESCRIPTION"); f <- intersect(c("Depends", "Imports", "LinkingTo", "Suggests"), colnames(d)); p <- trimws(sub("[(].*", "", unlist(strsplit(d[1, f], ",")))); rd <- setdiff(p[nzchar(p)], c("R", rownames(installed.packages()))); if (length(rd)) install.packages(rd, repos = "https://cloud.r-project.org")'
       check-args:
         description: >
           Arguments to R CMD check inside the container.
@@ -207,8 +218,11 @@ jobs:
           # and asking for one is a startup_failure. Three dots diff from the
           # merge base, which for a pull request is exactly what it changes,
           # from its first commit on.
+          # A rename is listed under its new name, with the old one in
+          # previous_filename; both count, or `git mv R/x.R x.md` reads as a
+          # documentation-only change.
           if ! files=$(gh api "repos/$REPO/compare/$base...$head" \
-                         --jq '(.files // []) | length, .[].filename'); then
+                         --jq '(.files // []) | length, (.[] | .filename, (.previous_filename // empty))'); then
             echo "Could not list the changed files, so everything runs."
             exit 0
           fi

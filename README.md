@@ -949,10 +949,14 @@ handled it, and the process died rather than returning an error. That is the
 finding. An ordinary non-zero exit is the *opposite*: the error was raised and
 propagated, which is what should happen.
 
-`expect-pattern` is what turns "did not crash" into "behaved". A package that
-swallows the failure and returns a truncated document has not crashed and has
-not behaved either; set this to the condition the package is supposed to
-raise. It is empty by default, because the right pattern is package-specific.
+`expect-pattern` is what turns "did not crash" into "behaved": a run that
+fails because of the injected allocation must fail with the condition the
+package is supposed to raise. It is empty by default, because the right
+pattern is package-specific. It is checked only on runs that exit non-zero —
+one allocation is failed per run and R retries after a GC, so a clean exit
+usually means the failure was absorbed. A package that swallows the failure
+and returns a truncated document still exits 0; have `run` check its result
+(`stopifnot(...)`) to catch that.
 
 Keep `run` small — it runs once per allocation in the sweep, so this belongs
 on a schedule. `max-allocations` caps the sweep.
@@ -1013,7 +1017,7 @@ when a release is near:
       targets: >-
         [{"name": "aarch64", "platform": "linux/arm64",
           "image": "arm64v8/debian:bookworm",
-          "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev"}]
+          "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev libuv1-dev"}]
 ```
 
 Each leg prints `uname -m`, `.Machine$sizeof.pointer` and
@@ -1028,8 +1032,11 @@ adding failure modes that have nothing to do with the architecture.
 **A leg that ran nothing is not green.** `R CMD check` exits non-zero only on
 an ERROR, and a package whose `tests/testthat.R` guards `library(testthat)`
 (as CRAN's no-Suggests check requires) skips its whole suite where testthat is
-not installed — which, in these source-only images, is the default. Two inputs
-close both holes:
+not installed. The default `setup` lines install the system headers testthat's
+dependencies build against (libuv, and kernel headers on Alpine), and the
+default `install-dependencies` builds it — but a package's own system
+libraries belong in `setup`, and a dependency that fails to build only warns.
+Two inputs close both holes:
 
 ```yaml
     with:
@@ -1038,9 +1045,7 @@ close both holes:
 ```
 
 `require-tests` counts the `PASS` totals in `<pkg>.Rcheck/tests/*.Rout` and
-prints them, so the log shows how much actually ran. Pair it with a `setup`
-that installs testthat (`r-cran-testthat` on Debian) or an
-`install-dependencies` that builds it. On the Debian images, also generate
+prints them, so the log shows how much actually ran. On the Debian images, also generate
 `en_US.UTF-8` (`locales`, `locale-gen`): `R CMD check` sets that locale and
 reports a WARNING when the image cannot honour it.
 
@@ -1121,6 +1126,11 @@ GCC's `-fanalyzer` is a symbolic-execution pass covering exactly those:
 `-Wanalyzer-malloc-leak`, `-Wanalyzer-null-dereference`,
 `-Wanalyzer-file-leak`. Unlike ASan and valgrind, which only see paths
 something actually ran, it reaches code no test executes.
+
+The flags go into `CFLAGS`, so this analyses C sources only. The job fails if
+no compile in the build carried them — a `src/` of nothing but C++ would
+otherwise report "0 findings" without having analysed anything. Leave it out
+for a C++-only package.
 
 ```yaml
 jobs:
