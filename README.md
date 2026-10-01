@@ -14,6 +14,10 @@ updates automatically, or to an exact tag (e.g. `@v1.0.0`) to lock a specific
 release. Avoid `@main`—it tracks the development tip and may contain breaking
 changes.
 
+Publishing a `vX.Y.Z` release moves `vX` to it automatically
+([`release.yml`](.github/workflows/release.yml)); prereleases, and releases
+older than the newest in their line, leave it where it is.
+
 See [Releases](https://github.com/pedrobtz/r-actions/releases) for the full
 changelog.
 
@@ -676,7 +680,9 @@ a package name in an ecosystem a vendored C library does not belong to, and a
 project that publishes advisories elsewhere will show none here.
 
 > **Note:** this workflow opens issues, so the caller must grant
-> `issues: write`.
+> `issues: write` — even with `on-new-version: summary`. Without it the run
+> ends in a `startup_failure` with no log. Closing the issue is respected: it
+> is not reopened until upstream moves to another version.
 
 ### `valgrind.yml` — Valgrind
 
@@ -820,9 +826,11 @@ including for the real regression next month. The second is what actually
 happens, because a red check everyone knows is wrong gets routed around within
 a day.
 
-`baseline` is a checked-in file of accepted findings. The job then fails only
-on findings that are *not* in it — the same shape, and the same reason, as
-`valgrind.yml`'s `suppressions`.
+`baseline` is a checked-in file of accepted findings. With
+`fail-on-findings: true`, the job then fails only on findings that are *not*
+in it — the same shape, and the same reason, as `valgrind.yml`'s
+`suppressions`. Without the gate it only filters what is reported, and the
+job warns that it cannot fail.
 
 ```yaml
 jobs:

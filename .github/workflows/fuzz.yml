@@ -256,7 +256,7 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install clang
         run: |
@@ -333,7 +333,7 @@ jobs:
 
       - name: Restore the corpus
         if: inputs.cache-corpus
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: corpus
           key: fuzz-corpus-${{ github.repository }}-${{ github.run_id }}
@@ -405,12 +405,12 @@ jobs:
 
       - name: Save the corpus
         if: always() && inputs.cache-corpus
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: corpus
           key: fuzz-corpus-${{ github.repository }}-${{ github.run_id }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: fuzz-findings

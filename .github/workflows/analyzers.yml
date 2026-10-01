@@ -224,7 +224,7 @@ jobs:
       R_KEEP_PKG_SOURCE: yes
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Nothing to analyse without C
         id: probe
@@ -244,13 +244,15 @@ jobs:
       # loud rather than skipped quietly.
       - name: Check the compiler is GCC
         if: steps.probe.outputs.skip == 'false'
+        env:
+          CONTAINER: ${{ inputs.container }}
         run: |
           set -eu
           cc="$(R CMD config CC || true)"
           case "$cc" in
             *gcc*|*g++*) echo "ok  compiler is '${cc}'" ;;
             *)
-              echo "::error::-fanalyzer is a GCC option, and ${{ inputs.container }} compiles with '${cc}'."
+              echo "::error::-fanalyzer is a GCC option, and ${CONTAINER} compiles with '${cc}'."
               echo "::error::Use a GCC image, or drive clang's analyzer instead."
               exit 1
               ;;
@@ -316,6 +318,7 @@ jobs:
           EXCLUDE: ${{ inputs.exclude }}
           FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
           BUILD_STATUS: ${{ steps.build.outputs.status }}
+          ANALYZER_FLAGS: ${{ inputs.analyzer-flags }}
         run: |
           set -eu
 
@@ -425,7 +428,7 @@ jobs:
           # The build's own status outlives the report: a compile that died
           # is a failure whatever the analyzer did or did not say first.
           if [ "${BUILD_STATUS}" -ne 0 ]; then
-            echo "::error::the package failed to build under ${{ inputs.analyzer-flags }}"
+            echo "::error::the package failed to build under ${ANALYZER_FLAGS}"
             exit 1
           fi
 
@@ -439,7 +442,7 @@ jobs:
             echo "-fanalyzer reported nothing outside excluded paths."
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && steps.probe.outputs.skip == 'false'
         with:
           name: analyzer-${{ inputs.container }}
