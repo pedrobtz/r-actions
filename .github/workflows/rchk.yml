@@ -224,6 +224,14 @@ jobs:
             fi
           fi
 
+          # The image exits 0 when the package will not install -- seen with
+          # a configure script whose system library the image lacks -- and
+          # then analyses nothing. Its own messages are the only sign.
+          if grep -qE '^Could not install package|^Cannot find package ' rchk-output.txt; then
+            echo "::error::rchk could not install the package, so nothing was analysed; see the install output above"
+            exit 1
+          fi
+
       # The pattern matters more than it looks.
       #
       # It used to include "too many", which matches rchk's
