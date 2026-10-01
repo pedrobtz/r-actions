@@ -8,7 +8,9 @@ set -euo pipefail
 
 major="${1:-v1}"
 
-newest="$(git tag -l "${major}.*" | sort -V | tail -1)"
+# Releases only: `sort -V` ranks v1.3.0-rc.1 above v1.3.0, and v1 is not
+# meant to follow a prerelease.
+newest="$(git tag -l "${major}.*" | grep -E "^${major}(\.[0-9]+)+$" | sort -V | tail -1 || true)"
 if [ -z "$newest" ]; then
   echo "No ${major}.* release tags found; nothing to compare against." >&2
   exit 1
@@ -33,3 +35,14 @@ if [ "$major_sha" != "$newest_sha" ]; then
 fi
 
 echo "${major} tracks ${newest} (${major_sha:0:8})."
+
+# The incident above was main moving on with no release cut at all, which a
+# tag-to-tag comparison cannot see. Not a failure -- merges land before the
+# release that ships them -- but said out loud on every run.
+if git rev-parse -q --verify HEAD >/dev/null; then
+  unreleased="$(git rev-list --count "${newest}..HEAD")"
+  if [ "$unreleased" -gt 0 ]; then
+    echo "::notice::${unreleased} commit(s) on $(git rev-parse --abbrev-ref HEAD) since ${newest}," \
+         "not yet released to @${major} consumers."
+  fi
+fi

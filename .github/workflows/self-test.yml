@@ -29,7 +29,7 @@ jobs:
     name: workflow invariants
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # A virtualenv rather than `pip install`, because the runner's system
       # Python is externally managed and refuses to install into itself.
@@ -46,7 +46,7 @@ jobs:
     # -- which is how it shipped aborting every process it was preloaded into.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build it from the workflow and run programs under it
         run: bash tests/check-alloc-interposer.sh
 
@@ -58,7 +58,7 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 

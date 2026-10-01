@@ -16,6 +16,7 @@ WORKFLOWS = pathlib.Path(".github/workflows")
 # one needs. Anything else must be read-only.
 WRITERS = {
     "coverage.yml": {"contents": "write"},
+    "release.yml": {"contents": "write"},
     "vendor-upstream.yml": {"contents": "read", "issues": "write"},
 }
 
@@ -86,18 +87,26 @@ def permissions_of(doc):
     the last job's value instead would report whichever job happened to sort
     last, which is how the first version of this check accused coverage.yml of
     being read-only.
-    """
-    if "permissions" in doc:
-        return doc["permissions"]
 
-    widest = {}
+    Top-level and job-level blocks are both read. Returning the top-level
+    block alone let a job add `contents: write` under a workflow-wide
+    `contents: read` without this check ever seeing it.
+    """
+    top = doc.get("permissions")
+    if top is not None and not isinstance(top, dict):
+        return top
+
+    widest = dict(top or {})
     for job in (doc.get("jobs") or {}).values():
-        if not isinstance(job, dict) or not isinstance(job.get("permissions"), dict):
+        if not isinstance(job, dict) or "permissions" not in job:
             continue
-        for scope, value in job["permissions"].items():
+        perms = job["permissions"]
+        if not isinstance(perms, dict):
+            return perms
+        for scope, value in perms.items():
             if RANK.get(value, 0) >= RANK.get(widest.get(scope), -1):
                 widest[scope] = value
-    return widest or None
+    return widest if (top is not None or widest) else None
 
 
 for path in sorted(WORKFLOWS.glob("*.yml")):
