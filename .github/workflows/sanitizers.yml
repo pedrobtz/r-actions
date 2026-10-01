@@ -386,7 +386,7 @@ jobs:
       R_KEEP_PKG_SOURCE: yes
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # libomp-dev is not optional for an OpenMP package. R's Makeconf
       # puts -fopenmp in SHLIB_OPENMP_CFLAGS whatever the compiler, and
@@ -610,9 +610,11 @@ jobs:
 
       - name: Apply caller environment
         if: inputs.env != ''
+        env:
+          CALLER_ENV: ${{ inputs.env }}
         run: |
           set -euo pipefail
-          printf '%s\n' "${{ inputs.env }}" | while IFS= read -r line; do
+          printf '%s\n' "$CALLER_ENV" | while IFS= read -r line; do
             case "$line" in
               ''|'#'*) continue ;;
               *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
@@ -666,7 +668,7 @@ jobs:
           fi
           exit 1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ubsan-${{ matrix.compiler }}
@@ -713,7 +715,7 @@ jobs:
       R_KEEP_PKG_SOURCE: yes
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # dependencies = TRUE, so Suggests are included: R CMD check reports a
       # missing Suggests as an ERROR, not a NOTE, and most of these images'
@@ -990,7 +992,7 @@ jobs:
           fi
           exit "$status"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: asan-${{ matrix.container }}

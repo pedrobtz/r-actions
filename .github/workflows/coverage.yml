@@ -1,6 +1,13 @@
 on:
   workflow_call:
     inputs:
+      timeout-minutes:
+        description: >
+          Timeout for the `coverage` and `native` jobs, each. Without one, a
+          hung test holds the runner for GitHub's six-hour default.
+        type: number
+        required: false
+        default: 60
       native:
         description: >
           Also run the `native` job: line and branch coverage of the C in
@@ -93,6 +100,7 @@ jobs:
   # no reason to do it while holding a token that can push to main.
   coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
 
     permissions:
       contents: read
@@ -106,7 +114,7 @@ jobs:
       R_KEEP_PKG_SOURCE: yes
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: r-lib/actions/setup-r@v2
         with:
@@ -170,8 +178,11 @@ jobs:
   # nothing but git and a heredoc.
   badge:
     needs: coverage
-    if: github.event_name == 'push'
+    # Branch pushes only. On a tag push GITHUB_REF_NAME is the tag, and the
+    # commit pushed back to it is rejected -- five times, then the job fails.
+    if: github.event_name == 'push' && github.ref_type == 'branch'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     permissions:
       contents: write
@@ -179,7 +190,7 @@ jobs:
     steps:
       # An empty `ref` is checkout's own default, the triggering ref, so a
       # caller that sets no badge-branch gets exactly what it got before.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.badge-branch }}
 
@@ -348,6 +359,7 @@ jobs:
   native:
     if: inputs.native
     runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
 
     permissions:
       contents: read
@@ -357,7 +369,7 @@ jobs:
       R_KEEP_PKG_SOURCE: yes
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Nothing to measure without C
         id: probe
@@ -539,7 +551,7 @@ jobs:
           cat ../summary.md >> "$GITHUB_STEP_SUMMARY"
           cat ../summary.md
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && steps.probe.outputs.skip == 'false'
         with:
           name: native-coverage

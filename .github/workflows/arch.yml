@@ -265,14 +265,14 @@ jobs:
     name: ${{ matrix.target.name }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Only for a leg the host cannot execute itself. linux/386 is x86 code
       # on an x86-64 CPU and linux/amd64 is the host, so registering QEMU for
       # either is setup time bought for nothing.
       - name: Set up QEMU
         if: ${{ !startsWith(matrix.target.platform, 'linux/amd64') && !startsWith(matrix.target.platform, 'linux/386') }}
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Check on ${{ matrix.target.name }}
         env:
@@ -366,7 +366,7 @@ jobs:
             "${IMAGE}" \
             sh -c "${SETUP} && sh /arch/run.sh"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: arch-${{ matrix.target.name }}
