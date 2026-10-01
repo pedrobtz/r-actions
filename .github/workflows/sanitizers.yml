@@ -306,8 +306,11 @@ jobs:
           # and asking for one is a startup_failure. Three dots diff from the
           # merge base, which for a pull request is exactly what it changes,
           # from its first commit on.
+          # A rename is listed under its new name, with the old one in
+          # previous_filename; both count, or `git mv R/x.R x.md` reads as a
+          # documentation-only change.
           if ! files=$(gh api "repos/$REPO/compare/$base...$head" \
-                         --jq '(.files // []) | length, .[].filename'); then
+                         --jq '(.files // []) | length, (.[] | .filename, (.previous_filename // empty))'); then
             echo "Could not list the changed files, so everything runs."
             exit 0
           fi
@@ -942,21 +945,28 @@ jobs:
       # swallowed is a job that taught nobody anything.
       - name: Run under the sanitizer
         env:
-          R_LIBS: ${{ github.workspace }}/lib
+          SUPPRESSIONS: ${{ inputs.ubsan-suppressions }}
+          RUN_COMMAND: ${{ inputs.asan-run }}
+          _R_CHECK_FORCE_SUGGESTS_: "false"
+        run: |
+          set -u
+          # Both paths are built here from $GITHUB_WORKSPACE, not in `env:`
+          # from github.workspace: in a container job the expression is the
+          # *host's* path, which does not exist inside the container. That
+          # left R_LIBS pointing nowhere and handed UBSan a suppressions file
+          # it could not open -- which aborts every instrumented process.
+          export R_LIBS="${GITHUB_WORKSPACE}/lib"
           # No halt_on_error here, as in the runner job: this job reads the
           # log afterwards instead, and "runtime error:" in that pattern is
           # what makes a UBSan finding fail the job. Not log_path, unlike the
           # runner job: here UBSan runs inside the ASan runtime, log_path is a
           # flag the two share, and moving ASan's reports out of this log is a
           # change to try on its own rather than as a side effect.
-          UBSAN_OPTIONS: >-
-            print_stacktrace=1${{ inputs.ubsan-suppressions != ''
-              && format(':suppressions={0}/{1}', github.workspace, inputs.ubsan-suppressions)
-              || '' }}
-          RUN_COMMAND: ${{ inputs.asan-run }}
-          _R_CHECK_FORCE_SUGGESTS_: "false"
-        run: |
-          set -u
+          UBSAN_OPTIONS="print_stacktrace=1"
+          if [ -n "$SUPPRESSIONS" ]; then
+            UBSAN_OPTIONS="${UBSAN_OPTIONS}:suppressions=${GITHUB_WORKSPACE}/${SUPPRESSIONS}"
+          fi
+          export UBSAN_OPTIONS
           status=0
           if [ -n "$RUN_COMMAND" ]; then
             sh -c "$RUN_COMMAND" > sanitizer.log 2>&1 || status=$?
@@ -966,7 +976,8 @@ jobs:
               tarball=$(ls -t ./*.tar.gz | head -1)
               R CMD check --no-manual --no-build-vignettes "$tarball" \
                 >> sanitizer.log 2>&1 || status=$?
-              for out in ./*.Rcheck/*.Rout ./*.Rcheck/*.Rout.fail \
+              for out in ./*.Rcheck/00install.out \
+                         ./*.Rcheck/*.Rout ./*.Rcheck/*.Rout.fail \
                          ./*.Rcheck/tests/*.Rout ./*.Rcheck/tests/*.Rout.fail; do
                 [ -e "$out" ] || continue
                 echo "----- $out -----" >> sanitizer.log

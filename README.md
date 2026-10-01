@@ -957,10 +957,14 @@ handled it, and the process died rather than returning an error. That is the
 finding. An ordinary non-zero exit is the *opposite*: the error was raised and
 propagated, which is what should happen.
 
-`expect-pattern` is what turns "did not crash" into "behaved". A package that
-swallows the failure and returns a truncated document has not crashed and has
-not behaved either; set this to the condition the package is supposed to
-raise. It is empty by default, because the right pattern is package-specific.
+`expect-pattern` is what turns "did not crash" into "behaved": a run that
+fails because of the injected allocation must fail with the condition the
+package is supposed to raise. It is empty by default, because the right
+pattern is package-specific. It is checked only on runs that exit non-zero —
+one allocation is failed per run and R retries after a GC, so a clean exit
+usually means the failure was absorbed. A package that swallows the failure
+and returns a truncated document still exits 0; have `run` check its result
+(`stopifnot(...)`) to catch that.
 
 Keep `run` small — it runs once per allocation in the sweep, so this belongs
 on a schedule. `max-allocations` caps the sweep.
@@ -1146,6 +1150,11 @@ GCC's `-fanalyzer` is a symbolic-execution pass covering exactly those:
 `-Wanalyzer-malloc-leak`, `-Wanalyzer-null-dereference`,
 `-Wanalyzer-file-leak`. Unlike ASan and valgrind, which only see paths
 something actually ran, it reaches code no test executes.
+
+The flags go into `CFLAGS`, so this analyses C sources only. The job fails if
+no compile in the build carried them — a `src/` of nothing but C++ would
+otherwise report "0 findings" without having analysed anything. Leave it out
+for a C++-only package.
 
 ```yaml
 jobs:
