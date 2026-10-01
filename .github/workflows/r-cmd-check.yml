@@ -205,7 +205,7 @@ on:
         required: false
         default: '["clang23"]'
       timeout-minutes:
-        description: Job timeout in minutes, for both jobs.
+        description: Job timeout in minutes, for each job.
         type: number
         required: false
         default: 45
@@ -585,11 +585,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # This job exists because the compiler differs from the one every other
-      # job uses, so the log should say which compiler and which language
-      # standard actually ran. Without it the first question after a
-      # surprising result -- "is this image really the flavor I think it is?"
-      # -- costs a debugging round trip.
       # The r-hub images ship no cargo at all, so a package with a crate in
       # src/ cannot install here without this. rustup's own installer rather
       # than the distro's, for the reason the `rust` input gives: these
@@ -609,6 +604,11 @@ jobs:
           rustc --version
           cargo --version
 
+      # This job exists because the compiler differs from the one every other
+      # job uses, so the log should say which compiler and which language
+      # standard actually ran. Without it the first question after a
+      # surprising result -- "is this image really the flavor I think it is?"
+      # -- costs a debugging round trip.
       - name: Record the toolchain
         run: |
           set -eu
@@ -1013,9 +1013,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Proves the image is what the job name claims. R reports the size of
-      # its long double as capabilities("long.double"); FALSE is the whole
-      # reason this job exists, and TRUE means the image is not what we think.
       # The r-hub images ship no cargo at all, so a package with a crate in
       # src/ cannot install here without this. rustup's own installer rather
       # than the distro's, for the reason the `rust` input gives: these
@@ -1035,6 +1032,9 @@ jobs:
           rustc --version
           cargo --version
 
+      # Proves the image is what the job name claims. R reports the size of
+      # its long double as capabilities("long.double"); FALSE is the whole
+      # reason this job exists, and TRUE means the image is not what we think.
       - name: Record the long double configuration
         shell: Rscript {0}
         run: |
