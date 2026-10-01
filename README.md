@@ -1017,7 +1017,7 @@ when a release is near:
       targets: >-
         [{"name": "aarch64", "platform": "linux/arm64",
           "image": "arm64v8/debian:bookworm",
-          "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev"}]
+          "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev libuv1-dev"}]
 ```
 
 Each leg prints `uname -m`, `.Machine$sizeof.pointer` and
@@ -1032,8 +1032,11 @@ adding failure modes that have nothing to do with the architecture.
 **A leg that ran nothing is not green.** `R CMD check` exits non-zero only on
 an ERROR, and a package whose `tests/testthat.R` guards `library(testthat)`
 (as CRAN's no-Suggests check requires) skips its whole suite where testthat is
-not installed — which, in these source-only images, is the default. Two inputs
-close both holes:
+not installed. The default `setup` lines install the system headers testthat's
+dependencies build against (libuv, and kernel headers on Alpine), and the
+default `install-dependencies` builds it — but a package's own system
+libraries belong in `setup`, and a dependency that fails to build only warns.
+Two inputs close both holes:
 
 ```yaml
     with:
@@ -1042,9 +1045,7 @@ close both holes:
 ```
 
 `require-tests` counts the `PASS` totals in `<pkg>.Rcheck/tests/*.Rout` and
-prints them, so the log shows how much actually ran. Pair it with a `setup`
-that installs testthat (`r-cran-testthat` on Debian) or an
-`install-dependencies` that builds it. On the Debian images, also generate
+prints them, so the log shows how much actually ran. On the Debian images, also generate
 `en_US.UTF-8` (`locales`, `locale-gen`): `R CMD check` sets that locale and
 reports a WARNING when the image cannot honour it.
 

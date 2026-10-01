@@ -55,6 +55,12 @@ on:
           The default covers the two legs with the best ratio -- 32-bit and
           musl -- and both of them run without emulation on an x86-64 runner.
 
+          Each default setup installs the system headers testthat's own
+          dependencies compile against: libuv for fs, and on Alpine the kernel
+          headers for ps. Without them testthat could not be built, so a suite
+          guarded by requireNamespace("testthat") was skipped on every leg.
+          Add your package's own system libraries to `setup`.
+
           aarch64 is deliberately not in the default. It is worth having, and
           it is also the platform a large part of the world now develops on,
           so its bugs tend to be found already -- and it is the leg that
@@ -62,16 +68,16 @@ on:
 
               {"name": "aarch64", "platform": "linux/arm64",
                "image": "arm64v8/debian:bookworm",
-               "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev"}
+               "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev libuv1-dev"}
         type: string
         required: false
         default: >-
           [{"name": "i386", "platform": "linux/386",
             "image": "i386/debian:bookworm",
-            "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev"},
+            "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev libuv1-dev"},
            {"name": "musl", "platform": "linux/amd64",
             "image": "alpine:3.21",
-            "setup": "apk add --no-cache R R-dev R-doc build-base"}]
+            "setup": "apk add --no-cache R R-dev R-doc build-base linux-headers libuv-dev"}]
       install-dependencies:
         description: >
           Command run inside the container to install the package's
