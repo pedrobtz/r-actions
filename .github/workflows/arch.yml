@@ -55,6 +55,14 @@ on:
           The default covers the two legs with the best ratio -- 32-bit and
           musl -- and both of them run without emulation on an x86-64 runner.
 
+          Each default setup installs what an ordinary package's check needs
+          beyond R itself. On Debian, the en_US.UTF-8 locale (R CMD check
+          sets it and reports a WARNING when the image cannot honour it) and
+          libuv1-dev. On Alpine, libuv-dev and linux-headers. fs builds only
+          against a system libuv and ps only with the kernel headers, and
+          without them nothing above them builds either -- pkgload, testthat,
+          sass, rmarkdown -- so a testthat suite cannot run at all.
+
           aarch64 is deliberately not in the default. It is worth having, and
           it is also the platform a large part of the world now develops on,
           so its bugs tend to be found already -- and it is the leg that
@@ -62,16 +70,16 @@ on:
 
               {"name": "aarch64", "platform": "linux/arm64",
                "image": "arm64v8/debian:bookworm",
-               "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev"}
+               "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev locales libuv1-dev && echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen && locale-gen"}
         type: string
         required: false
         default: >-
           [{"name": "i386", "platform": "linux/386",
             "image": "i386/debian:bookworm",
-            "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev"},
+            "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev locales libuv1-dev && echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen && locale-gen"},
            {"name": "musl", "platform": "linux/amd64",
             "image": "alpine:3.21",
-            "setup": "apk add --no-cache R R-dev R-doc build-base"}]
+            "setup": "apk add --no-cache R R-dev R-doc build-base linux-headers libuv-dev"}]
       install-dependencies:
         description: >
           Command run inside the container to install the package's
@@ -85,10 +93,19 @@ on:
 
           Set to "" for a package with no dependencies, which is the case this
           runs fastest in and the case a vendored-C package is often in.
+
+          The default reads Depends, Imports, LinkingTo and Suggests from the
+          package's own DESCRIPTION and installs whatever is missing. It fails
+          when a hard dependency did not install, and names any suggested
+          package that did not, since a Suggests that will not build here
+          should not fail the leg (and require-tests catches a missing
+          testthat). It used to resolve the package through
+          tools::package_dependencies() against installed.packages(), where
+          the package is not yet, and so installed nothing at all.
         type: string
         required: false
         default: >-
-          Rscript -e 'if (length(rd <- setdiff(unlist(tools::package_dependencies(".", db = installed.packages(), which = "most")), rownames(installed.packages())))) install.packages(rd, repos = "https://cloud.r-project.org")'
+          Rscript -e 'd <- read.dcf("DESCRIPTION"); dep <- function(fields) { f <- intersect(fields, colnames(d)); x <- trimws(sub("[(].*", "", unlist(strsplit(d[1, f], ",")))); unique(setdiff(x[nzchar(x)], "R")) }; want <- dep(c("Depends", "Imports", "LinkingTo", "Suggests")); need <- setdiff(want, rownames(installed.packages())); cat("dependencies:", want, "\nto install:", need, "\n"); if (length(need)) install.packages(need, repos = "https://cloud.r-project.org"); miss <- setdiff(want, rownames(installed.packages())); if (length(miss)) message("not installed: ", paste(miss, collapse = ", ")); hard <- intersect(miss, dep(c("Depends", "Imports", "LinkingTo"))); if (length(hard)) stop("hard dependencies did not install: ", paste(hard, collapse = ", "))'
       check-args:
         description: >
           Arguments to R CMD check inside the container.
@@ -98,9 +115,16 @@ on:
           checks that answer nothing new here while adding failure modes that
           have nothing to do with the architecture. r-cmd-check.yml is where
           --as-cran belongs.
+
+          --ignore-vignettes because the tarball is built with
+          --no-build-vignettes: checking vignettes that were never built
+          reports two WARNINGs for any package that has one, which
+          error-on: warning turns into a failure that says nothing about the
+          architecture. Whether the vignettes build is r-cmd-check.yml's
+          question.
         type: string
         required: false
-        default: --no-manual --no-build-vignettes
+        default: --no-manual --ignore-vignettes
       error-on:
         description: >
           Lowest R CMD check status that fails the leg: `error`, `warning`
