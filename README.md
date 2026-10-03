@@ -1038,11 +1038,25 @@ close both holes:
 ```
 
 `require-tests` counts the `PASS` totals in `<pkg>.Rcheck/tests/*.Rout` and
-prints them, so the log shows how much actually ran. Pair it with a `setup`
-that installs testthat (`r-cran-testthat` on Debian) or an
-`install-dependencies` that builds it. On the Debian images, also generate
-`en_US.UTF-8` (`locales`, `locale-gen`): `R CMD check` sets that locale and
-reports a WARNING when the image cannot honour it.
+prints them, so the log shows how much actually ran.
+
+The defaults are meant to make both settings pass for an ordinary testthat
+package with no further configuration:
+
+* `install-dependencies` reads Depends, Imports, LinkingTo and Suggests from
+  the package's `DESCRIPTION` and builds what is missing from source. It fails
+  when a hard dependency did not install, and names a suggested one that did
+  not.
+* The default Debian setup generates `en_US.UTF-8`: `R CMD check` sets that
+  locale and reports a WARNING when the image cannot honour it. A custom
+  Debian target should do the same (`locales`, `locale-gen`), and can take
+  testthat prebuilt from `r-cran-testthat` instead of building it.
+* The default Alpine setup adds `linux-headers` and `libuv-dev`, without which
+  `ps` and `fs` do not build, and with them nothing above them up to testthat.
+* `check-args` passes `--ignore-vignettes`, because the tarball is built with
+  `--no-build-vignettes` and checking vignettes that were never built reports
+  two WARNINGs for any package that has one. `r-cmd-check.yml` is where the
+  vignettes are checked.
 
 ### `cran-special.yml` — rcnst, rlibro and vnu
 
