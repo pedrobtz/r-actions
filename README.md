@@ -1051,8 +1051,11 @@ package with no further configuration:
   locale and reports a WARNING when the image cannot honour it. A custom
   Debian target should do the same (`locales`, `locale-gen`), and can take
   testthat prebuilt from `r-cran-testthat` instead of building it.
-* The default Alpine setup adds `linux-headers` and `libuv-dev`, without which
-  `ps` and `fs` do not build, and with them nothing above them up to testthat.
+* The default setups add the system libraries the testthat chain builds
+  against: `libuv1-dev` on Debian, `libuv-dev` and `linux-headers` on Alpine.
+  `fs` builds only against a system libuv and `ps` only with the kernel
+  headers, and without them nothing above them builds either: pkgload,
+  testthat, sass, rmarkdown.
 * `check-args` passes `--ignore-vignettes`, because the tarball is built with
   `--no-build-vignettes` and checking vignettes that were never built reports
   two WARNINGs for any package that has one. `r-cmd-check.yml` is where the

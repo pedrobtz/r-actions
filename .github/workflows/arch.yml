@@ -56,11 +56,12 @@ on:
           musl -- and both of them run without emulation on an x86-64 runner.
 
           Each default setup installs what an ordinary package's check needs
-          beyond R itself. On Debian, the en_US.UTF-8 locale: R CMD check
-          sets it and reports a WARNING when the image cannot honour it. On
-          Alpine, linux-headers and libuv-dev: without them ps and fs fail to
-          build, and with them processx, callr, pkgload and testthat, so a
-          testthat suite cannot run at all.
+          beyond R itself. On Debian, the en_US.UTF-8 locale (R CMD check
+          sets it and reports a WARNING when the image cannot honour it) and
+          libuv1-dev. On Alpine, libuv-dev and linux-headers. fs builds only
+          against a system libuv and ps only with the kernel headers, and
+          without them nothing above them builds either -- pkgload, testthat,
+          sass, rmarkdown -- so a testthat suite cannot run at all.
 
           aarch64 is deliberately not in the default. It is worth having, and
           it is also the platform a large part of the world now develops on,
@@ -69,13 +70,13 @@ on:
 
               {"name": "aarch64", "platform": "linux/arm64",
                "image": "arm64v8/debian:bookworm",
-               "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev locales && echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen && locale-gen"}
+               "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev locales libuv1-dev && echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen && locale-gen"}
         type: string
         required: false
         default: >-
           [{"name": "i386", "platform": "linux/386",
             "image": "i386/debian:bookworm",
-            "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev locales && echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen && locale-gen"},
+            "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev locales libuv1-dev && echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen && locale-gen"},
            {"name": "musl", "platform": "linux/amd64",
             "image": "alpine:3.21",
             "setup": "apk add --no-cache R R-dev R-doc build-base linux-headers libuv-dev"}]
