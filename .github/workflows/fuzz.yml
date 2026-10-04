@@ -336,9 +336,12 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: corpus
-          key: fuzz-corpus-${{ github.repository }}-${{ github.run_id }}
+          key: fuzz-corpus-${{ github.repository }}-${{ inputs.harness }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Keyed on the harness: two fuzz jobs in one repository restored
+          # each other's corpora, each seeding a target with inputs shaped for
+          # a different parser.
           restore-keys: |
-            fuzz-corpus-${{ github.repository }}-
+            fuzz-corpus-${{ github.repository }}-${{ inputs.harness }}-
 
       - name: Seed the corpus
         env:
@@ -352,8 +355,12 @@ jobs:
               exit 1
             fi
             # Flattened, because libFuzzer takes a directory of files and not
-            # a tree, and a conformance suite is usually a tree.
-            find "$SEEDS" -type f -exec cp {} corpus/ \; 2>/dev/null || true
+            # a tree, and a conformance suite is usually a tree. Named by
+            # content, as libFuzzer names its own: a plain copy let every
+            # valid/1.yaml overwrite every other directory's 1.yaml.
+            find "$SEEDS" -type f -print0 | while IFS= read -r -d '' f; do
+              cp "$f" "corpus/$(sha1sum < "$f" | cut -d' ' -f1)"
+            done
           fi
           echo "corpus holds $(find corpus -type f | wc -l | tr -d ' ') input(s)"
 
@@ -403,12 +410,31 @@ jobs:
           fi
           echo "no crashes in ${MAX_TIME}s."
 
+      # Merged down to the inputs that still add coverage before it is
+      # saved. Without this every run's new inputs were kept forever, and the
+      # cache -- and the time spent replaying it -- only ever grew. A merge
+      # that fails (a crashing input in the corpus, say) keeps it as it was.
+      - name: Minimise the corpus
+        if: always() && inputs.cache-corpus
+        run: |
+          set -u
+          before=$(find corpus -type f | wc -l | tr -d ' ')
+          mkdir -p corpus.min
+          if ./fuzz-target -merge=1 corpus.min corpus > merge.log 2>&1; then
+            rm -rf corpus && mv corpus.min corpus
+            echo "corpus minimised: ${before} -> $(find corpus -type f | wc -l | tr -d ' ') input(s)"
+          else
+            echo "::warning::corpus merge failed; saving it unminimised"
+            tail -20 merge.log
+            rm -rf corpus.min
+          fi
+
       - name: Save the corpus
         if: always() && inputs.cache-corpus
         uses: actions/cache/save@v6
         with:
           path: corpus
-          key: fuzz-corpus-${{ github.repository }}-${{ github.run_id }}
+          key: fuzz-corpus-${{ github.repository }}-${{ inputs.harness }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - uses: actions/upload-artifact@v7
         if: always()

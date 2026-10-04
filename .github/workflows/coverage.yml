@@ -124,6 +124,8 @@ jobs:
         with:
           dependencies: '"all"'
           extra-packages: any::covr
+          # Config/Needs/coverage in DESCRIPTION, as r-lib's own template.
+          needs: coverage
 
       - name: Run coverage
         id: coverage
@@ -473,7 +475,12 @@ jobs:
           set -eu
           cd src
 
-          if ! ls *.gcda >/dev/null 2>&1; then
+          # Recursively: sources under src/vendor/ and the like write their
+          # notes and counts beside their objects, in those subdirectories.
+          # A top-level glob never saw them -- a package whose C is all in
+          # subdirectories reported "no coverage data" as a success, and
+          # native-exclude's directory prefixes had nothing to match.
+          if ! find . -name '*.gcda' | grep -q .; then
             echo "::warning::no .gcda files: the instrumented build ran nothing"
             echo "## Native coverage" >> "$GITHUB_STEP_SUMMARY"
             echo >> "$GITHUB_STEP_SUMMARY"
@@ -483,7 +490,10 @@ jobs:
 
           # -b for branch counts, which is the point; -c to count branches
           # taken rather than report them as percentages of a percentage.
-          gcov -b -c *.gcno > gcov.log 2>&1 || true
+          # -p keeps a vendor/x.c and an x.c from overwriting each other's
+          # .gcov files.
+          mapfile -t notes < <(find . -name '*.gcno' | sed 's#^\./##' | sort)
+          gcov -b -c -p "${notes[@]}" > gcov.log 2>&1 || true
 
           : > /tmp/patterns
           if [ -n "$EXCLUDE" ]; then printf '%s\n' "$EXCLUDE" > /tmp/patterns; fi
