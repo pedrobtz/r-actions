@@ -236,6 +236,11 @@ jobs:
           if [ ! -d src ]; then
             echo "No src/ directory: nothing to analyse."
             echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif ! find src -name '*.c' | grep -q .; then
+            # The flags go into CFLAGS, so C++, Fortran or Rust alone gives
+            # -fanalyzer nothing to see. Said, and skipped, rather than failed.
+            echo "::notice::no C sources under src/: -fanalyzer covers C only, so there is nothing to analyse."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
@@ -435,14 +440,15 @@ jobs:
             exit 1
           fi
 
-          # The flags go into CFLAGS only, so a src/ of nothing but C++ -- or
-          # a Makevars that sets its own flags -- compiled with no analyzer
-          # at all and reported "0 findings". -fdiagnostics-plain-output is
+          # There is C here (the probe skipped otherwise), and the flags go
+          # into CFLAGS -- but a Makevars that sets its own flags, or a
+          # vendored build with its own make, can compile it with no
+          # analyzer at all and report "0 findings". -fdiagnostics-plain-output is
           # appended with them and nothing else adds it, so a compile line
           # carrying it is a compile the analyzer actually saw.
           if ! grep -q -e '-fdiagnostics-plain-output' analyzer-build.log; then
             echo "::error::no compile in the build carried the analyzer flags, so nothing was analysed."
-            echo "::error::-fanalyzer is applied through CFLAGS: it covers C sources, not C++."
+            echo "::error::-fanalyzer is applied through CFLAGS; check that src/Makevars does not replace them."
             exit 1
           fi
 

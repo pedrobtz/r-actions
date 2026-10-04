@@ -1151,10 +1151,10 @@ GCC's `-fanalyzer` is a symbolic-execution pass covering exactly those:
 `-Wanalyzer-file-leak`. Unlike ASan and valgrind, which only see paths
 something actually ran, it reaches code no test executes.
 
-The flags go into `CFLAGS`, so this analyses C sources only. The job fails if
-no compile in the build carried them — a `src/` of nothing but C++ would
-otherwise report "0 findings" without having analysed anything. Leave it out
-for a C++-only package.
+The flags go into `CFLAGS`, so this analyses C sources only. A `src/` with no
+`.c` files is skipped with a notice. One with C fails if no compile in the
+build carried the flags — a Makevars that replaces `CFLAGS` would otherwise
+report "0 findings" without having analysed anything.
 
 ```yaml
 jobs:
