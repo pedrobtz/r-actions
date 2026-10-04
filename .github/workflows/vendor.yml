@@ -74,19 +74,23 @@ jobs:
     name: vendored sources match manifest
     steps:
       # Full history: the guard diffs against the PR's base.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
+      # Inputs reach the scripts below through `env:`, never pasted into
+      # them: a quote, `$` or backtick in a pasted value is shell syntax.
       - name: Verify the vendored tree
+        env:
+          VERIFY: ${{ inputs.verify }}
         run: |
           set -eu
-          if [ ! -e "${{ inputs.verify }}" ]; then
-            echo "No ${{ inputs.verify }}; skipping tree verification."
+          if [ ! -e "$VERIFY" ]; then
+            echo "No ${VERIFY}; skipping tree verification."
             exit 0
           fi
-          chmod +x "${{ inputs.verify }}" 2>/dev/null || true
-          "./${{ inputs.verify }}"
+          chmod +x "$VERIFY" 2>/dev/null || true
+          "./${VERIFY}"
 
       # Reproducibility is the property being defended, and it is a property
       # of the commit, not of the working tree -- so it has to be checked on
@@ -94,9 +98,14 @@ jobs:
       # checksum was re-recorded to match it.
       - name: Vendored changes must update the manifest
         if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PATHS: ${{ inputs.paths }}
+          VENDOR_DIR: ${{ inputs.vendor-dir }}
+          MUST_UPDATE: ${{ inputs.must-update }}
         run: |
           set -eu
-          base="origin/${{ github.base_ref }}"
+          base="origin/${BASE_REF}"
           # Not --depth=1. A shallow fetch writes .git/shallow and grafts
           # the base ref, so its ancestry cannot be walked and `$base...HEAD`
           # has no merge base to resolve:
@@ -115,9 +124,9 @@ jobs:
           # checkout was shallow before this step ran: once .git/shallow
           # exists, an ordinary fetch does not remove it.
           if [ -f "$(git rev-parse --git-dir)/shallow" ]; then
-            git fetch --no-tags --unshallow origin "${{ github.base_ref }}"
+            git fetch --no-tags --unshallow origin "$BASE_REF"
           else
-            git fetch --no-tags origin "${{ github.base_ref }}"
+            git fetch --no-tags origin "$BASE_REF"
           fi
           # Three dots, deliberately: the guard asks what this pull request
           # changed, not how it differs from a base that may have moved
@@ -127,11 +136,11 @@ jobs:
           printf '%s\n' "$changed" > /tmp/vendor-changed-all
 
           # `paths` wins when set; otherwise the directory, as a prefix.
-          if [ -n '${{ inputs.paths }}' ]; then
-            printf '%s\n' '${{ inputs.paths }}' > /tmp/vendor-patterns
+          if [ -n "$PATHS" ]; then
+            printf '%s\n' "$PATHS" > /tmp/vendor-patterns
             what='the vendored paths'
           else
-            dir='${{ inputs.vendor-dir }}'
+            dir="$VENDOR_DIR"
             printf '%s\n' "${dir%/}" > /tmp/vendor-patterns
             what="$(printf '%s/' "${dir%/}")"
           fi
@@ -169,12 +178,12 @@ jobs:
           # runs in a subshell, so a failure recorded inside it is lost
           # unless it is propagated by hand -- and a guard that cannot fail
           # is the thing this workflow exists to avoid.
-          printf '%s\n' "${{ inputs.must-update }}" > /tmp/vendor-required
+          printf '%s\n' "$MUST_UPDATE" > /tmp/vendor-required
           printf '%s\n' "$changed" > /tmp/vendor-changed
           missing=0
           while IFS= read -r want; do
             [ -n "$want" ] || continue
-            if ! grep -qx "$want" /tmp/vendor-changed; then
+            if ! grep -qxF -- "$want" /tmp/vendor-changed; then
               echo
               echo "FAIL vendored sources changed without updating $want."
               missing=1

@@ -48,9 +48,13 @@ on:
           the one it already opened), `summary` only writes the job summary.
 
           `issue` is the default because the job summary of a scheduled run
-          is not a place anyone looks. It needs `issues: write` from the
-          caller; the job says so plainly rather than failing at the API call
-          if the grant is missing.
+          is not a place anyone looks. Anything else is an error rather than
+          a quiet `summary`.
+
+          Either way the caller must grant `issues: write`: this workflow
+          asks for it, and a called workflow asking for more than its caller
+          holds does not start at all -- GitHub reports a `startup_failure`
+          before any step can explain it.
         type: string
         required: false
         default: issue
@@ -108,7 +112,18 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - name: Check on-new-version
+        env:
+          MODE: ${{ inputs.on-new-version }}
+        run: |
+          case "$MODE" in
+            issue|summary) ;;
+            *)
+              echo "::error::on-new-version must be \`issue\` or \`summary\`, not \`${MODE}\`"
+              exit 1 ;;
+          esac
 
       - name: Read the pinned version
         id: pinned
@@ -300,6 +315,7 @@ jobs:
         run: |
           set -euo pipefail
           marker="<!-- r-actions:vendor-upstream:${UPSTREAM} -->"
+          version_marker="<!-- r-actions:vendor-upstream:latest=${LATEST} -->"
 
           if [ "${ADVISORY_COUNT}" -gt 0 ]; then
             title="Vendored ${UPSTREAM} is at ${PINNED}; ${LATEST} is out, and advisories are published"
@@ -317,6 +333,7 @@ jobs:
             echo "the version changes again."
             echo
             echo "${marker}"
+            echo "${version_marker}"
           } > issue-body.md
 
           # Search by marker, not by title: the title carries version numbers
@@ -326,9 +343,22 @@ jobs:
               --json number,body \
               --jq "map(select(.body | contains(\"${marker}\"))) | .[0].number // empty")"
 
+          # A closed issue about this same upstream version is a decision,
+          # not something to repeat: the body promises it will not reopen
+          # unless the version changes. Only open issues used to be searched,
+          # so closing one brought a new one back on the next run.
+          dismissed=""
+          if [ -z "$existing" ]; then
+            dismissed="$(gh issue list --state closed --limit 200 \
+                --json number,body \
+                --jq "map(select((.body | contains(\"${marker}\")) and (.body | contains(\"${version_marker}\")))) | .[0].number // empty")"
+          fi
+
           if [ -n "$existing" ]; then
             gh issue edit "$existing" --title "$title" --body-file issue-body.md
             echo "updated issue #${existing}"
+          elif [ -n "$dismissed" ]; then
+            echo "issue #${dismissed} about ${LATEST} was closed; not opening another"
           else
             if [ -n "$LABELS" ]; then
               gh issue create --title "$title" --body-file issue-body.md --label "$LABELS"

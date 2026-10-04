@@ -202,7 +202,7 @@ jobs:
       R_CHECK_CONSTANTS: "5"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Nothing to corrupt without compiled code
         id: src
@@ -285,7 +285,7 @@ jobs:
           fi
           echo "No constants finding."
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && steps.src.outputs.has-src == 'true'
         with:
           name: check-rcnst
@@ -315,7 +315,7 @@ jobs:
       R_KEEP_PKG_SOURCE: yes
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: r-lib/actions/setup-r@v2
         with:
@@ -422,7 +422,7 @@ jobs:
             [ -n "$d" ] && [ -d "$d" ] && chmod -R u+w "$d" || true
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: check-rlibro
@@ -449,7 +449,7 @@ jobs:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: r-lib/actions/setup-r@v2
         with:
@@ -528,7 +528,7 @@ jobs:
           }
           cat("The reference manual is valid HTML.\n")
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: vnu
