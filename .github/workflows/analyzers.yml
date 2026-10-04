@@ -173,8 +173,11 @@ jobs:
           # and asking for one is a startup_failure. Three dots diff from the
           # merge base, which for a pull request is exactly what it changes,
           # from its first commit on.
+          # A rename is listed under its new name, with the old one in
+          # previous_filename; both count, or `git mv R/x.R x.md` reads as a
+          # documentation-only change.
           if ! files=$(gh api "repos/$REPO/compare/$base...$head" \
-                         --jq '(.files // []) | length, .[].filename'); then
+                         --jq '(.files // []) | length, (.[] | .filename, (.previous_filename // empty))'); then
             echo "Could not list the changed files, so everything runs."
             exit 0
           fi
@@ -232,6 +235,11 @@ jobs:
           set -eu
           if [ ! -d src ]; then
             echo "No src/ directory: nothing to analyse."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif ! find src -name '*.c' | grep -q .; then
+            # The flags go into CFLAGS, so C++, Fortran or Rust alone gives
+            # -fanalyzer nothing to see. Said, and skipped, rather than failed.
+            echo "::notice::no C sources under src/: -fanalyzer covers C only, so there is nothing to analyse."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -429,6 +437,18 @@ jobs:
           # is a failure whatever the analyzer did or did not say first.
           if [ "${BUILD_STATUS}" -ne 0 ]; then
             echo "::error::the package failed to build under ${ANALYZER_FLAGS}"
+            exit 1
+          fi
+
+          # There is C here (the probe skipped otherwise), and the flags go
+          # into CFLAGS -- but a Makevars that sets its own flags, or a
+          # vendored build with its own make, can compile it with no
+          # analyzer at all and report "0 findings". -fdiagnostics-plain-output is
+          # appended with them and nothing else adds it, so a compile line
+          # carrying it is a compile the analyzer actually saw.
+          if ! grep -q -e '-fdiagnostics-plain-output' analyzer-build.log; then
+            echo "::error::no compile in the build carried the analyzer flags, so nothing was analysed."
+            echo "::error::-fanalyzer is applied through CFLAGS; check that src/Makevars does not replace them."
             exit 1
           fi
 

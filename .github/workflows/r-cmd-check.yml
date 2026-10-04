@@ -366,8 +366,11 @@ jobs:
           # and asking for one is a startup_failure. Three dots diff from the
           # merge base, which for a pull request is exactly what it changes,
           # from its first commit on.
+          # A rename is listed under its new name, with the old one in
+          # previous_filename; both count, or `git mv R/x.R x.md` reads as a
+          # documentation-only change.
           if ! files=$(gh api "repos/$REPO/compare/$base...$head" \
-                         --jq '(.files // []) | length, .[].filename'); then
+                         --jq '(.files // []) | length, (.[] | .filename, (.previous_filename // empty))'); then
             echo "Could not list the changed files, so everything runs."
             exit 0
           fi
@@ -523,8 +526,21 @@ jobs:
             | grep -v '^#' | grep -v '^$' \
             | paste -sd '|' -)
 
-          warnings=$(grep -E '^\* checking .* \.\.\. WARNING$' "$log" \
-            | sed -E 's/^\* checking (.*) \.\.\. WARNING$/\1/' || true)
+          # The status is not always last on the header line. --as-cran
+          # turns on timings, which put "[15s/16s]" before it, and a step
+          # with output of its own (tests, vignettes) prints the status on a
+          # line of its own after that output. Matching only "... WARNING$"
+          # missed both, so a new warning on a slow build passed the gate.
+          warnings=$(awk '
+            /^\* checking / {
+              hdr = $0
+              sub(/^\* checking /, "", hdr)
+              sub(/ \.\.\..*$/, "", hdr)
+            }
+            /^\* checking .* \.\.\. (\[[^]]*\] )?WARNING$/ || /^ *(\[[^]]*\] )?WARNING$/ {
+              if (hdr != "") print hdr
+            }
+          ' "$log")
 
           if [ -n "$warnings" ]; then
             echo "--- warnings reported ---"
@@ -729,8 +745,21 @@ jobs:
             | grep -v '^#' | grep -v '^$' \
             | paste -sd '|' -)
 
-          warnings=$(grep -E '^\* checking .* \.\.\. WARNING$' "$log" \
-            | sed -E 's/^\* checking (.*) \.\.\. WARNING$/\1/' || true)
+          # The status is not always last on the header line. --as-cran
+          # turns on timings, which put "[15s/16s]" before it, and a step
+          # with output of its own (tests, vignettes) prints the status on a
+          # line of its own after that output. Matching only "... WARNING$"
+          # missed both, so a new warning on a slow build passed the gate.
+          warnings=$(awk '
+            /^\* checking / {
+              hdr = $0
+              sub(/^\* checking /, "", hdr)
+              sub(/ \.\.\..*$/, "", hdr)
+            }
+            /^\* checking .* \.\.\. (\[[^]]*\] )?WARNING$/ || /^ *(\[[^]]*\] )?WARNING$/ {
+              if (hdr != "") print hdr
+            }
+          ' "$log")
 
           if [ -n "$warnings" ]; then
             echo "--- warnings reported ---"
@@ -909,8 +938,21 @@ jobs:
             | grep -v '^#' | grep -v '^$' \
             | paste -sd '|' -)
 
-          warnings=$(grep -E '^\* checking .* \.\.\. WARNING$' "$log" \
-            | sed -E 's/^\* checking (.*) \.\.\. WARNING$/\1/' || true)
+          # The status is not always last on the header line. --as-cran
+          # turns on timings, which put "[15s/16s]" before it, and a step
+          # with output of its own (tests, vignettes) prints the status on a
+          # line of its own after that output. Matching only "... WARNING$"
+          # missed both, so a new warning on a slow build passed the gate.
+          warnings=$(awk '
+            /^\* checking / {
+              hdr = $0
+              sub(/^\* checking /, "", hdr)
+              sub(/ \.\.\..*$/, "", hdr)
+            }
+            /^\* checking .* \.\.\. (\[[^]]*\] )?WARNING$/ || /^ *(\[[^]]*\] )?WARNING$/ {
+              if (hdr != "") print hdr
+            }
+          ' "$log")
 
           if [ -n "$warnings" ]; then
             echo "--- warnings reported ---"
@@ -1059,8 +1101,21 @@ jobs:
             | grep -v '^#' | grep -v '^$' \
             | paste -sd '|' -)
 
-          warnings=$(grep -E '^\* checking .* \.\.\. WARNING$' "$log" \
-            | sed -E 's/^\* checking (.*) \.\.\. WARNING$/\1/' || true)
+          # The status is not always last on the header line. --as-cran
+          # turns on timings, which put "[15s/16s]" before it, and a step
+          # with output of its own (tests, vignettes) prints the status on a
+          # line of its own after that output. Matching only "... WARNING$"
+          # missed both, so a new warning on a slow build passed the gate.
+          warnings=$(awk '
+            /^\* checking / {
+              hdr = $0
+              sub(/^\* checking /, "", hdr)
+              sub(/ \.\.\..*$/, "", hdr)
+            }
+            /^\* checking .* \.\.\. (\[[^]]*\] )?WARNING$/ || /^ *(\[[^]]*\] )?WARNING$/ {
+              if (hdr != "") print hdr
+            }
+          ' "$log")
 
           if [ -n "$warnings" ]; then
             echo "--- warnings reported ---"

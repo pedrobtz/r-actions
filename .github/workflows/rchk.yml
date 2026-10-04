@@ -148,8 +148,11 @@ jobs:
           # and asking for one is a startup_failure. Three dots diff from the
           # merge base, which for a pull request is exactly what it changes,
           # from its first commit on.
+          # A rename is listed under its new name, with the old one in
+          # previous_filename; both count, or `git mv R/x.R x.md` reads as a
+          # documentation-only change.
           if ! files=$(gh api "repos/$REPO/compare/$base...$head" \
-                         --jq '(.files // []) | length, .[].filename'); then
+                         --jq '(.files // []) | length, (.[] | .filename, (.previous_filename // empty))'); then
             echo "Could not list the changed files, so everything runs."
             exit 0
           fi
@@ -200,13 +203,43 @@ jobs:
       - name: Build source tarball
         run: R CMD build --no-build-vignettes --no-manual .
 
+      # pipefail, because the default shell has none: without it the exit
+      # status is tee's, so a failed pull, an rchk crash or a package that
+      # would not install left an empty log -- which the steps below read as
+      # "no findings" and passed, fail-on-findings or not.
+      #
+      # A non-zero exit fails the step only when the log shows no analysis
+      # at all. Whether the image also exits non-zero on findings is not
+      # documented, and a run that did analyse is for the gate below to
+      # judge, under fail-on-findings, rather than for this step.
+      #
+      # The tarball is named from DESCRIPTION rather than globbed, so another
+      # .tar.gz in the repository cannot ride along into the container.
       - name: Run rchk in Docker
         run: |
+          set -o pipefail
+          tarball="$(sed -n 's/^Package:[[:space:]]*//p' DESCRIPTION)_$(sed -n 's/^Version:[[:space:]]*//p' DESCRIPTION).tar.gz"
           mkdir -p rchk-packages
-          mv *.tar.gz rchk-packages/
-          tarball=$(ls rchk-packages)
+          mv "$tarball" rchk-packages/
+          status=0
           docker run --rm -v "$(pwd)/rchk-packages":/rchk/packages \
-            kalibera/rchk:latest "/rchk/packages/${tarball}" | tee rchk-output.txt
+            kalibera/rchk:latest "/rchk/packages/${tarball}" | tee rchk-output.txt || status=$?
+          if [ "$status" -ne 0 ]; then
+            if grep -qE '^Function |\[(UP|PB|UPB)\]|Suspicious call|too many states' rchk-output.txt; then
+              echo "::warning::rchk exited ${status} after analysing; the findings decide"
+            else
+              echo "::error::rchk exited ${status} without analysing anything: the pull, build or install failed"
+              exit 1
+            fi
+          fi
+
+          # The image exits 0 when the package will not install -- seen with
+          # a configure script whose system library the image lacks -- and
+          # then analyses nothing. Its own messages are the only sign.
+          if grep -qE '^Could not install package|^Cannot find package ' rchk-output.txt; then
+            echo "::error::rchk could not install the package, so nothing was analysed; see the install output above"
+            exit 1
+          fi
 
       # The pattern matters more than it looks.
       #
