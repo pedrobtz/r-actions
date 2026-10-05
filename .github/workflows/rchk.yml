@@ -76,6 +76,27 @@ on:
         type: string
         required: false
         default: ""
+      github-packages:
+        description: >
+          R packages on GitHub to install into the rchk image's library
+          before the package is analysed: one `owner/repo` a line, each
+          optionally `@ref` (a branch, a tag or a commit). In the order
+          given, so list a package after anything it needs.
+
+          The image installs a package's dependencies itself, but only from
+          CRAN and Bioconductor; a `Remotes:` field means nothing to it. A
+          package that links to another not yet on CRAN -- `LinkingTo` a
+          sibling's headers, say -- therefore could not be analysed at all:
+          the install fails and nothing is checked. Each repository named
+          here is fetched, built with `R CMD build`, and installed with the
+          image's own R into the library rchk then finds it in, so the
+          image skips it. Drop the entry once the dependency is on CRAN.
+
+              github-packages: |
+                pedrobtz/zufast
+        type: string
+        required: false
+        default: ""
 
 name: rchk
 
@@ -202,6 +223,69 @@ jobs:
 
       - name: Build source tarball
         run: R CMD build --no-build-vignettes --no-manual .
+
+      # Before the analysis, so that the image finds them installed. Cloned
+      # outside the workspace: nothing here may ride along into the
+      # package's own tarball.
+      - name: Install GitHub packages into the image
+        if: inputs.github-packages != ''
+        env:
+          GITHUB_PACKAGES: ${{ inputs.github-packages }}
+        run: |
+          set -eu
+          # One `owner/repo[@ref]` a line; `#` starts a comment. The ref may
+          # be a branch, a tag or a commit, so it is fetched rather than
+          # cloned with --branch, which takes no commit. Read from the
+          # environment, never interpolated into this script.
+          fetch_github_packages() {   # $1: the directory to clone into
+            mkdir -p "$1"
+            printf '%s\n' "$GITHUB_PACKAGES" | while IFS= read -r line; do
+              spec=$(printf '%s' "${line%%#*}" | tr -d '[:space:]')
+              [ -n "$spec" ] || continue
+              repo=${spec%%@*}
+              ref=HEAD
+              case "$spec" in *@*) ref=${spec#*@} ;; esac
+              if ! printf '%s' "$repo" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' \
+                 || ! printf '%s' "$ref" | grep -Eq '^[A-Za-z0-9_./-]+$'; then
+                echo "::error::github-packages: not owner/repo[@ref]: ${spec}"
+                exit 1
+              fi
+              dir="$1/${repo##*/}"
+              git init --quiet "$dir"
+              git -C "$dir" fetch --quiet --depth 1 "https://github.com/${repo}.git" "$ref"
+              git -C "$dir" checkout --quiet FETCH_HEAD
+              echo "$dir" >> "$1/order.txt"
+              echo "${repo}@${ref} -> ${dir} ($(git -C "$dir" rev-parse --short HEAD))"
+            done
+          }
+          src="$RUNNER_TEMP/github-packages"
+          fetch_github_packages "$src"
+          # One numbered directory a package, built in the order given, so
+          # the install below follows the list whatever the packages are
+          # called.
+          n=0
+          while IFS= read -r d; do
+            n=$((n + 1))
+            out="rchk-packages/github/$(printf '%02d' "$n")"
+            mkdir -p "$out"
+            (cd "$out" && R CMD build --no-build-vignettes --no-manual "$d" >/dev/null)
+            echo "built $(ls "$out")"
+          done < "$src/order.txt"
+          cat > rchk-packages/github/install.R <<'RSCRIPT'
+          lib <- Sys.getenv("R_LIBS")
+          dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+          for (d in sort(list.dirs("/rchk/packages/github", recursive = FALSE))) {
+            tarball <- Sys.glob(file.path(d, "*.tar.gz"))
+            stopifnot(length(tarball) == 1L)
+            install.packages(tarball, lib = lib, repos = NULL)
+            pkg <- sub("_.*", "", basename(tarball))
+            if (!requireNamespace(pkg, lib.loc = lib, quietly = TRUE)) {
+              stop("installing ", pkg, " from GitHub failed")
+            }
+          }
+          RSCRIPT
+          docker run --rm -v "$(pwd)/rchk-packages":/rchk/packages \
+            kalibera/rchk:latest R -f /rchk/packages/github/install.R
 
       # pipefail, because the default shell has none: without it the exit
       # status is tee's, so a failed pull, an rchk crash or a package that
