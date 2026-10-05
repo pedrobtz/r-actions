@@ -97,6 +97,23 @@ on:
         type: string
         required: false
         default: ""
+      system-packages:
+        description: >
+          System libraries the package needs to build, as apt package names
+          separated by spaces or newlines, installed into the rchk image
+          before anything is built in it. `#` starts a comment.
+
+          The image ships R and the toolchain rchk needs, and none of the
+          -dev packages a configure script probes for. A package that links
+          a system library -- GMP, say -- therefore fails its own configure
+          inside the image and is never analysed. Each docker run starts a
+          fresh container, so the packages are baked into a local image
+          built on `kalibera/rchk:latest`, and every run in the job uses it.
+
+              system-packages: libgmp-dev
+        type: string
+        required: false
+        default: ""
 
 name: rchk
 
@@ -224,6 +241,39 @@ jobs:
       - name: Build source tarball
         run: R CMD build --no-build-vignettes --no-manual .
 
+      # First, so that every docker run below -- the GitHub packages' install
+      # included -- happens in the image that has them. A container is thrown
+      # away with --rm, so installing into one would be lost by the next.
+      # Package names are read from the environment and checked against
+      # Debian's naming rules before they reach the Dockerfile.
+      - name: Add system packages to the image
+        if: inputs.system-packages != ''
+        env:
+          SYSTEM_PACKAGES: ${{ inputs.system-packages }}
+        run: |
+          set -eu
+          pkgs=$(printf '%s\n' "$SYSTEM_PACKAGES" | sed 's/#.*//' | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')
+          if [ -z "$pkgs" ]; then
+            echo "::error::system-packages is set but names no package"
+            exit 1
+          fi
+          for p in $pkgs; do
+            if ! printf '%s' "$p" | grep -Eq '^[a-z0-9][a-z0-9+.-]+$'; then
+              echo "::error::system-packages: not a Debian package name: ${p}"
+              exit 1
+            fi
+          done
+          dir="$RUNNER_TEMP/rchk-image"
+          mkdir -p "$dir"
+          cat > "$dir/Dockerfile" <<EOF_DOCKERFILE
+          FROM kalibera/rchk:latest
+          RUN apt-get update \\
+           && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $pkgs \\
+           && rm -rf /var/lib/apt/lists/*
+          EOF_DOCKERFILE
+          docker build --tag r-actions/rchk:local "$dir"
+          echo "RCHK_IMAGE=r-actions/rchk:local" >> "$GITHUB_ENV"
+
       # Before the analysis, so that the image finds them installed. Cloned
       # outside the workspace: nothing here may ride along into the
       # package's own tarball.
@@ -285,7 +335,7 @@ jobs:
           }
           RSCRIPT
           docker run --rm -v "$(pwd)/rchk-packages":/rchk/packages \
-            kalibera/rchk:latest R -f /rchk/packages/github/install.R
+            "${RCHK_IMAGE:-kalibera/rchk:latest}" R -f /rchk/packages/github/install.R
 
       # pipefail, because the default shell has none: without it the exit
       # status is tee's, so a failed pull, an rchk crash or a package that
@@ -307,7 +357,7 @@ jobs:
           mv "$tarball" rchk-packages/
           status=0
           docker run --rm -v "$(pwd)/rchk-packages":/rchk/packages \
-            kalibera/rchk:latest "/rchk/packages/${tarball}" | tee rchk-output.txt || status=$?
+            "${RCHK_IMAGE:-kalibera/rchk:latest}" "/rchk/packages/${tarball}" | tee rchk-output.txt || status=$?
           if [ "$status" -ne 0 ]; then
             if grep -qE '^Function |\[(UP|PB|UPB)\]|Suspicious call|too many states' rchk-output.txt; then
               echo "::warning::rchk exited ${status} after analysing; the findings decide"
