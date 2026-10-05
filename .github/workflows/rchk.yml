@@ -56,7 +56,9 @@ on:
 
               UP<TAB>cyaml_parse_document<TAB>src/cyaml_parser.c
 
-          `#` comments and blank lines are ignored. When the job finds
+          `#` comments (at the start of a line or after whitespace) and
+          blank lines are ignored; a `#` inside a name, as in a C++
+          `{lambda()#1}`, is part of it. When the job finds
           something unlisted it prints the exact lines to add, so adopting a
           finding is copy-and-paste rather than transcription.
 
@@ -446,8 +448,17 @@ jobs:
               where = ""
               if (loc ~ /:[0-9]+$/) { sub(/:[0-9]+$/, "", loc); where = normpath(loc) }
 
+              # A WARNING names its function between the last " at " and the
+              # location. Not $(NF-1): the name of a C++ function has spaces in it
+              # -- `f()::{lambda()#1}::operator()() const` -- and keyed on one
+              # field the line fell through to "could not be keyed".
               who = fn
-              if ($0 ~ /^WARNING/ && NF >= 3 && $(NF-2) == "at") who = $(NF-1)
+              if ($0 ~ /^WARNING/ && NF >= 3) {
+                body = substr($0, 1, length($0) - length($NF) - 1)
+                p = 0; s = body
+                while ((i = index(s, " at ")) > 0) { p += i + 3; s = substr(s, i + 4) }
+                if (p > 0) who = substr(body, p + 1)
+              }
 
               # Anything that matched as a finding but could not be keyed is
               # kept, not dropped. A parser that silently discards what it
@@ -500,9 +511,12 @@ jobs:
             echo "::warning::baseline is set but fail-on-findings is off, so nothing here can fail the job; set fail-on-findings: true to gate on it"
           fi
 
+          # A comment starts a line or follows whitespace. A bare `#` is part
+          # of the key: C++ lambdas are named `{lambda()#1}`, and stripping
+          # from there made their entries match nothing.
           : > baseline.keys
           if [ -n "$BASELINE" ]; then
-            sed -e 's/#.*$//' -e 's/[[:space:]]*$//' "$BASELINE" \
+            sed -e 's/^#.*$//' -e 's/[[:space:]]#.*$//' -e 's/[[:space:]]*$//' "$BASELINE" \
               | grep -v '^[[:space:]]*$' | sort -u > baseline.keys || true
           fi
 

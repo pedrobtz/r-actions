@@ -842,7 +842,9 @@ jobs:
 ```
 
 One finding per line, three tab-separated fields — tag, function, file — with
-`#` comments ignored:
+`#` comments ignored. A comment starts a line or follows whitespace; a `#`
+inside a name, as in a C++ lambda's `{lambda()#1}`, is part of the key, and a
+function name may contain spaces:
 
 ```
 # upstream false positive: v is protected by the caller
