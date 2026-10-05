@@ -842,7 +842,9 @@ jobs:
 ```
 
 One finding per line, three tab-separated fields — tag, function, file — with
-`#` comments ignored:
+`#` comments ignored. A comment starts a line or follows whitespace; a `#`
+inside a name, as in a C++ lambda's `{lambda()#1}`, is part of the key, and a
+function name may contain spaces:
 
 ```
 # upstream false positive: v is protected by the caller
@@ -889,6 +891,31 @@ jobs:
 One `owner/repo` a line, each optionally `@ref` (a branch, a tag or a
 commit), installed in the order given. Drop the entry once the dependency is
 on CRAN.
+
+#### `system-packages` — a system library the package links
+
+The image has R and rchk's toolchain, and none of the `-dev` packages a
+`configure` script looks for. A package that links a system library therefore
+fails its own configure inside the image, and nothing is analysed — the job
+says so and fails, rather than reporting a clean run. Name the apt packages,
+and the job builds a local image on `kalibera/rchk:latest` with them
+installed, which every run in the job then uses (the `github-packages` install
+included):
+
+```yaml
+jobs:
+  rchk:
+    uses: pedrobtz/r-actions/.github/workflows/rchk.yml@v1
+    with:
+      system-packages: libgmp-dev
+```
+
+Names are separated by spaces or newlines; `#` starts a comment. The image is
+Ubuntu, so these are Ubuntu's package names — the same ones a runner's
+`apt-get install` takes. It compiles with clang and `-stdlib=libc++`, so a C++
+library built against libstdc++ will link only if the package uses no symbol
+that depends on that ABI.
+
 ### `fuzz.yml` — coverage-guided fuzzing
 
 Random fuzzing and coverage-guided fuzzing are not the same tool. A loop that
