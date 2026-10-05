@@ -944,7 +944,7 @@ artifact so it can be replayed.
 
 `embed-r: true` builds the target against an embedded R, for a harness whose
 code under test calls R's API (serialization hooks, SEXP glue): R is installed,
-the target is compiled with `R CMD config --cppflags` and linked to libR, and
+the target is compiled with `R CMD config --cppflags` and linked to libR alone, and
 it runs with `-detect_leaks=0`, since R's heap outlives each input by design.
 The harness starts R once in `LLVMFuzzerInitialize()` (`Rf_initEmbeddedR()`,
 with `R_SignalHandlers = 0` and the C stack check off, because libFuzzer and

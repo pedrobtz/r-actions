@@ -396,7 +396,10 @@ jobs:
             [ -f "$r_home/lib/libR.so" ] || { echo "::error::embed-r: no libR.so under $r_home/lib"; exit 1; }
             echo "R_HOME=$r_home" >> "$GITHUB_ENV"
             r_cppflags=$(R CMD config --cppflags)
-            r_ldflags="$(R CMD config --ldflags) -Wl,-rpath,$r_home/lib"
+            # libR alone: it carries its own dependencies. R CMD config
+            # --ldflags would add R's build-time LIBS, which on the runner's R
+            # name an OpenMP runtime (-lomp) that is not installed.
+            r_ldflags="-L$r_home/lib -lR -Wl,-rpath,$r_home/lib"
           fi
           # shellcheck disable=SC2046,SC2086
           clang $CFLAGS_IN $r_cppflags "-fsanitize=${SANITIZERS}" \
