@@ -154,6 +154,25 @@ on:
         type: string
         required: false
         default: ""
+      embed-r:
+        description: >
+          Build the target against an embedded R: R is installed, the build
+          adds `R CMD config --cppflags` and links libR (with an rpath to
+          it), `R_HOME` is exported for the run, and libFuzzer runs with
+          `-detect_leaks=0`, because R's heap persists from one input to the
+          next by design and LeakSanitizer would report it as a leak on every
+          run.
+
+          For a harness that exercises C which calls R's API (serialization
+          hooks, SEXP glue): it starts R once in `LLVMFuzzerInitialize` with
+          `Rf_initEmbeddedR()`, turns off R's signal handlers
+          (`R_SignalHandlers = 0`) and C stack check, since libFuzzer and ASan
+          own both, and runs each input under `R_ToplevelExec()` so that an R
+          error is reported rather than escaping to R's top level. R itself is
+          not instrumented; only the target's own code is.
+        type: boolean
+        required: false
+        default: false
       timeout-minutes:
         type: number
         required: false
@@ -316,6 +335,9 @@ jobs:
           }
           fetch_github_packages .github-packages
 
+      - uses: r-lib/actions/setup-r@v2
+        if: inputs.embed-r
+
       - name: Collect the sources
         id: sources
         env:
@@ -364,11 +386,21 @@ jobs:
           HARNESS: ${{ inputs.harness }}
           CFLAGS_IN: ${{ inputs.cflags }}
           SANITIZERS: ${{ inputs.sanitizers }}
+          EMBED_R: ${{ inputs.embed-r }}
         run: |
           set -eu
-          # shellcheck disable=SC2046
-          clang $CFLAGS_IN "-fsanitize=${SANITIZERS}" \
-            "$HARNESS" $(cat sources.txt) -o fuzz-target
+          r_cppflags=""
+          r_ldflags=""
+          if [ "$EMBED_R" = true ]; then
+            r_home=$(R RHOME)
+            [ -f "$r_home/lib/libR.so" ] || { echo "::error::embed-r: no libR.so under $r_home/lib"; exit 1; }
+            echo "R_HOME=$r_home" >> "$GITHUB_ENV"
+            r_cppflags=$(R CMD config --cppflags)
+            r_ldflags="$(R CMD config --ldflags) -Wl,-rpath,$r_home/lib"
+          fi
+          # shellcheck disable=SC2046,SC2086
+          clang $CFLAGS_IN $r_cppflags "-fsanitize=${SANITIZERS}" \
+            "$HARNESS" $(cat sources.txt) -o fuzz-target $r_ldflags
 
           # Verify rather than assume, as every other instrumented job here
           # does. A target built without the harness compiled in, or without
@@ -426,10 +458,13 @@ jobs:
         env:
           DICT: ${{ inputs.dictionary }}
           MAX_TIME: ${{ inputs.max-total-time }}
+          EMBED_R: ${{ inputs.embed-r }}
           EXTRA: ${{ inputs.libfuzzer-args }}
         run: |
           set -eu
           args="-max_total_time=${MAX_TIME} -print_final_stats=1"
+          # an embedded R's heap outlives each input by design
+          if [ "$EMBED_R" = true ]; then args="${args} -detect_leaks=0"; fi
           if [ -n "$DICT" ]; then
             if [ ! -f "$DICT" ]; then
               echo "::error::dictionary: no such file: ${DICT}"
@@ -473,7 +508,10 @@ jobs:
           set -u
           before=$(find corpus -type f | wc -l | tr -d ' ')
           mkdir -p corpus.min
-          if ./fuzz-target -merge=1 corpus.min corpus > merge.log 2>&1; then
+          leaks=""
+          if [ "${{ inputs.embed-r }}" = true ]; then leaks="-detect_leaks=0"; fi
+          # shellcheck disable=SC2086
+          if ./fuzz-target -merge=1 $leaks corpus.min corpus > merge.log 2>&1; then
             rm -rf corpus && mv corpus.min corpus
             echo "corpus minimised: ${before} -> $(find corpus -type f | wc -l | tr -d ' ') input(s)"
           else

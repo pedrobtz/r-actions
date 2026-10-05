@@ -942,6 +942,16 @@ scheduled one accumulate into one campaign.
 A finding fails the job, and the input that caused it is uploaded as an
 artifact so it can be replayed.
 
+`embed-r: true` builds the target against an embedded R, for a harness whose
+code under test calls R's API (serialization hooks, SEXP glue): R is installed,
+the target is compiled with `R CMD config --cppflags` and linked to libR, and
+it runs with `-detect_leaks=0`, since R's heap outlives each input by design.
+The harness starts R once in `LLVMFuzzerInitialize()` (`Rf_initEmbeddedR()`,
+with `R_SignalHandlers = 0` and the C stack check off, because libFuzzer and
+ASan own both) and runs each input under `R_ToplevelExec()`, so an R error is
+a reported failure rather than a jump to R's top level. zubin's
+`tools/fuzz/rfuzz.c` is a worked example.
+
 `github-packages` checks out other repositories the target compiles against,
 at `.github-packages/<repo>`, for headers that come from a package not on CRAN
 (or that only `LinkingTo` would otherwise provide):
