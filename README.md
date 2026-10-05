@@ -866,6 +866,29 @@ file only ever grows: entries accumulate, nobody removes them, and eventually
 one suppresses a real finding it happens to match. Making a disappeared entry
 fail means fixing the code forces you to delete its line, so the file shrinks
 over time instead.
+
+#### `github-packages` — a dependency that is not on CRAN yet
+
+The rchk image installs a package's dependencies itself, from CRAN and
+Bioconductor only; a `Remotes:` field means nothing to it. A package that
+`LinkingTo`s a sibling's headers before that sibling reaches CRAN therefore
+cannot be analysed at all: the install fails inside the image and nothing is
+checked. Name the repositories, and the job fetches each, builds it, and
+installs it with the image's own R into the library rchk looks in first:
+
+```yaml
+jobs:
+  rchk:
+    uses: pedrobtz/r-actions/.github/workflows/rchk.yml@v1
+    with:
+      fail-on-findings: true
+      github-packages: |
+        pedrobtz/zufast
+```
+
+One `owner/repo` a line, each optionally `@ref` (a branch, a tag or a
+commit), installed in the order given. Drop the entry once the dependency is
+on CRAN.
 ### `fuzz.yml` — coverage-guided fuzzing
 
 Random fuzzing and coverage-guided fuzzing are not the same tool. A loop that
@@ -918,6 +941,18 @@ scheduled one accumulate into one campaign.
 
 A finding fails the job, and the input that caused it is uploaded as an
 artifact so it can be replayed.
+
+`github-packages` checks out other repositories the target compiles against,
+at `.github-packages/<repo>`, for headers that come from a package not on CRAN
+(or that only `LinkingTo` would otherwise provide):
+
+```yaml
+    with:
+      harness: tools/fuzz/fuzz_layout.c
+      sources: tools/fuzz/support.c
+      github-packages: pedrobtz/zufast
+      cflags: -g -O1 -fno-omit-frame-pointer -Iinst/include -I.github-packages/zufast/inst/include
+```
 ### `alloc-failure.yml` — does the OOM path work?
 
 Allocation failure is the least-tested path in any C library, because nothing

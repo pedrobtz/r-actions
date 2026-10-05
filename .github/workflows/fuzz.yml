@@ -137,6 +137,23 @@ on:
         type: boolean
         required: false
         default: true
+      github-packages:
+        description: >
+          Repositories on GitHub whose sources the fuzz target compiles
+          against: one `owner/repo` a line, each optionally `@ref` (a
+          branch, a tag or a commit). Each is checked out at
+          `.github-packages/<repo>` in the workspace, so `cflags` can name
+          its headers:
+
+              github-packages: pedrobtz/zufast
+              cflags: -g -O1 -fno-omit-frame-pointer -Iinst/include -I.github-packages/zufast/inst/include
+
+          For a package whose headers include another's that is not on CRAN
+          yet, or that `LinkingTo` provides at build time and nothing here
+          would otherwise fetch.
+        type: string
+        required: false
+        default: ""
       timeout-minutes:
         type: number
         required: false
@@ -265,6 +282,39 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang
+
+      - name: Check out GitHub packages
+        if: inputs.github-packages != ''
+        env:
+          GITHUB_PACKAGES: ${{ inputs.github-packages }}
+        run: |
+          set -eu
+          # One `owner/repo[@ref]` a line; `#` starts a comment. The ref may
+          # be a branch, a tag or a commit, so it is fetched rather than
+          # cloned with --branch, which takes no commit. Read from the
+          # environment, never interpolated into this script.
+          fetch_github_packages() {   # $1: the directory to clone into
+            mkdir -p "$1"
+            printf '%s\n' "$GITHUB_PACKAGES" | while IFS= read -r line; do
+              spec=$(printf '%s' "${line%%#*}" | tr -d '[:space:]')
+              [ -n "$spec" ] || continue
+              repo=${spec%%@*}
+              ref=HEAD
+              case "$spec" in *@*) ref=${spec#*@} ;; esac
+              if ! printf '%s' "$repo" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' \
+                 || ! printf '%s' "$ref" | grep -Eq '^[A-Za-z0-9_./-]+$'; then
+                echo "::error::github-packages: not owner/repo[@ref]: ${spec}"
+                exit 1
+              fi
+              dir="$1/${repo##*/}"
+              git init --quiet "$dir"
+              git -C "$dir" fetch --quiet --depth 1 "https://github.com/${repo}.git" "$ref"
+              git -C "$dir" checkout --quiet FETCH_HEAD
+              echo "$dir" >> "$1/order.txt"
+              echo "${repo}@${ref} -> ${dir} ($(git -C "$dir" rev-parse --short HEAD))"
+            done
+          }
+          fetch_github_packages .github-packages
 
       - name: Collect the sources
         id: sources
