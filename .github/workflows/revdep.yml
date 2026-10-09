@@ -1,0 +1,151 @@
+on:
+  workflow_call:
+    inputs:
+      consumers-file:
+        description: >
+          File in the calling repository listing the packages to test, one
+          per line: a GitHub repository, then optionally the ref to test
+          (the repository's default branch if omitted). Blank lines and
+          lines starting with `#` are ignored.
+
+              pedrobtz/zubin    main
+              pedrobtz/zutoml
+        type: string
+        required: false
+        default: tools/revdep/consumers.txt
+      consumers:
+        description: >
+          The same list given inline, overriding `consumers-file` when set.
+          A file is usually better: a local script can read it too, and
+          adding a consumer is then a one-line change that this workflow's
+          caller can trigger on.
+        type: string
+        required: false
+        default: ""
+      r-version:
+        description: R version to test with.
+        type: string
+        required: false
+        default: release
+
+name: revdep
+
+# Reads the caller's checkout and public consumer repositories; writes
+# nothing.
+permissions:
+  contents: read
+
+jobs:
+  consumers:
+    name: list consumers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: ${{ inputs.consumers-file }}
+          sparse-checkout-cone-mode: false
+
+      - id: list
+        name: Read the consumer list
+        env:
+          CONSUMERS: ${{ inputs.consumers }}
+          CONSUMERS_FILE: ${{ inputs.consumers-file }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CONSUMERS" ]; then
+            list=$CONSUMERS
+          elif [ -f "$CONSUMERS_FILE" ]; then
+            list=$(cat "$CONSUMERS_FILE")
+          else
+            echo "::error::no consumers: set \`consumers\`, or add $CONSUMERS_FILE"
+            exit 1
+          fi
+          matrix=$(printf '%s\n' "$list" | grep -v '^[[:space:]]*#' |
+            jq -R -s -c '[split("\n")[] | select(test("\\S")) | [splits("\\s+")] |
+                          map(select(length > 0)) | {repo: .[0], ref: (.[1] // "")}]')
+          bad=$(echo "$matrix" | jq -r '.[].repo | select(test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$") | not)')
+          if [ -n "$bad" ]; then
+            echo "::error::not owner/repo: $bad"
+            exit 1
+          fi
+          echo "$matrix" | jq .
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  revdep:
+    needs: consumers
+    # An empty matrix is an error in GitHub Actions, not an empty run.
+    if: needs.consumers.outputs.matrix != '[]'
+    name: ${{ matrix.repo }}${{ matrix.ref && '@' || '' }}${{ matrix.ref }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.consumers.outputs.matrix) }}
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      CONSUMER: ${{ matrix.repo }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: package
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ matrix.repo }}
+          ref: ${{ matrix.ref }}
+          path: consumer
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ inputs.r-version }}
+          use-public-rspm: true
+
+      # Installs the consumer's dependencies -- including, through its
+      # Remotes, a released or default-branch copy of the package under
+      # test, which the next step replaces.
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: consumer
+          extra-packages: any::testthat
+
+      # Install and tests in one step, so a consumer that no longer compiles
+      # counts as a failure like one whose tests fail. tests/testthat.R runs
+      # against the installed consumer, as R CMD check runs it; nothing else
+      # R CMD check does is repeated here.
+      - id: test
+        name: Build against the package under test and run the tests
+        continue-on-error: true
+        run: |
+          R CMD INSTALL package
+          R CMD INSTALL --preclean consumer
+          cd consumer/tests && Rscript testthat.R
+
+      # On a pull request, a failure is only the pull request's fault if the
+      # consumer passes against the base branch. Otherwise the consumer was
+      # already broken, and failing every pull request until it is fixed
+      # would teach people to ignore this job.
+      - name: Check out the base branch
+        if: steps.test.outcome == 'failure' && github.event_name == 'pull_request'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.base_ref }}
+          path: package-base
+
+      - name: Verdict
+        if: steps.test.outcome == 'failure'
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            echo "::error::$CONSUMER fails against $GITHUB_REF_NAME"
+            exit 1
+          fi
+          R CMD INSTALL package-base
+          R CMD INSTALL --preclean consumer
+          if (cd consumer/tests && Rscript testthat.R); then
+            echo "::error::$CONSUMER passes against $GITHUB_BASE_REF but fails against this pull request"
+            exit 1
+          fi
+          echo "::warning::$CONSUMER also fails against $GITHUB_BASE_REF; not caused by this pull request"

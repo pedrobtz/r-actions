@@ -1,0 +1,26 @@
+on:
+  # Only when what consumers compile changes. For a header-only package that
+  # is its installed headers; add the consumer list and this file, so a new
+  # consumer is tested by the pull request that adds it.
+  pull_request:
+    paths:
+      - inst/include/**
+      - tools/revdep/**
+      - .github/workflows/revdep.yml
+  # Weekly: consumers change too, and a consumer whose own main has moved on
+  # can break against yours without a pull request on either side.
+  schedule:
+    - cron: "37 5 * * 3"
+  workflow_dispatch:
+
+name: revdep
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  revdep:
+    uses: pedrobtz/r-actions/.github/workflows/revdep.yml@v1
+    permissions:
+      contents: read

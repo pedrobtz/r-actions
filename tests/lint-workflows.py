@@ -30,6 +30,7 @@ GATED = {
 }
 UNGATED = {
     "coverage.yml": "its job summary and badge are wanted on every change",
+    "revdep.yml": "callers trigger it on the paths consumers see, and on a schedule",
     "vendor.yml": "it matches its own paths and takes seconds",
     "vendor-upstream.yml": "it runs on a schedule, where there is no diff",
 }
