@@ -684,6 +684,67 @@ project that publishes advisories elsewhere will show none here.
 > ends in a `startup_failure` with no log. Closing the issue is respected: it
 > is not reopened until upstream moves to another version.
 
+### `revdep.yml` — reverse dependencies
+
+For packages that other packages build against — most of all a header-only
+library used through `LinkingTo`, where a consumer compiles your code into its
+own shared object and finds out about a change only when it next rebuilds.
+Builds each consumer against the calling repository's checkout and runs its
+testthat suite.
+
+It is deliberately the cheap version of a reverse-dependency check: one job
+per consumer, on Ubuntu and one R version, in parallel, running
+`tests/testthat.R` against the installed consumer and nothing else `R CMD
+check` does. What breaks a consumer of compiled code shows up there — it stops
+compiling, or its tests fail — and a CRAN NOTE in someone else's package is
+not something your pull request can fix.
+
+```yaml
+jobs:
+  revdep:
+    uses: pedrobtz/r-actions/.github/workflows/revdep.yml@v1
+```
+
+It reads the consumers from `tools/revdep/consumers.txt`, one per line: a
+GitHub repository, then optionally the ref to test.
+
+```
+# tools/revdep/consumers.txt
+pedrobtz/zubin    main
+pedrobtz/zutoml
+```
+
+Optional inputs:
+
+```yaml
+    with:
+      consumers-file: tools/revdep/consumers.txt   # default
+      consumers: |                                 # inline; overrides the file
+        pedrobtz/zubin main
+      r-version: release                           # default
+```
+
+The consumer's dependencies are installed from its own `DESCRIPTION`,
+`Remotes` included, so a consumer that is not on CRAN, or depends on packages
+that are not, works as it does in its own CI; the package under test is then
+installed over whatever copy that brought in. The consumer repositories must
+be public.
+
+**On a pull request, a failure is retried against the base branch.** The job
+fails only if the consumer passes there; if it fails on both, the consumer was
+already broken, and the job warns instead. Failing every pull request until
+someone else fixes their package would teach people to ignore the job. On a
+schedule or a manual run there is no base to compare with, and any failure
+fails.
+
+**Trigger it narrowly.** The example runs on pull requests that change
+`inst/include/**`, the consumer list or the workflow itself, weekly, and on
+demand; a pull request that changes documentation or R code that no consumer
+compiles does not start it. The weekly run covers the other direction, a
+consumer whose own default branch moved on. There is no
+[documentation-only gate](#documentation-only-changes): the caller's `paths`
+already does that job, more precisely.
+
 ### `valgrind.yml` — Valgrind
 
 Runs `R CMD check --use-valgrind` under R-release, then **scans the check
@@ -1461,6 +1522,13 @@ jobs:
 Copy [`examples/vendor-upstream.yml`](examples/vendor-upstream.yml) into your
 package as `.github/workflows/vendor-upstream.yml` and point it at the
 upstream repository.
+
+### Testing reverse dependencies
+
+Copy [`examples/revdep.yml`](examples/revdep.yml) into your package as
+`.github/workflows/revdep.yml`, list the consumers in
+`tools/revdep/consumers.txt`, and adjust its `paths` to what consumers
+compile.
 
 ### Run all native checks together
 
