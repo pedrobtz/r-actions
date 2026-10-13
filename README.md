@@ -1403,6 +1403,14 @@ cran-special, arch, fuzz and alloc-failure. Each shows as *skipped*, which
 GitHub counts as passing for a required check. coverage, vendor and
 vendor-upstream run regardless, and so does the caller's own pkgdown workflow.
 
+A change to `DESCRIPTION`, `README.Rmd` or `README.qmd`, alongside nothing but
+documentation, is package metadata rather than code: a version bump, a new
+URL, a reworded Description. It runs r-cmd-check's `quick-runners` legs — one
+Ubuntu R-release check by default, whatever `profile` says — and skips the
+containers, `nosuggests`, `nold` and every other gated workflow. With the
+caller's pkgdown workflow, that is one R CMD check and one site build. Any
+other file in the same change runs everything as usual.
+
 Documentation means, and only means:
 
 | Counts | Why |
@@ -1440,7 +1448,7 @@ It lists the changed files through the compare API, which needs only
 `contents: read` — the pull request's file list would need `pull-requests:
 read`, which a caller need not hold, and a reusable workflow asking for more
 than its caller holds is a `startup_failure`. Its log lists every changed file
-as `docs` or `code`, and a skip says so in the job summary.
+as `docs`, `meta` or `code`, and a skip says so in the job summary.
 
 It is on by default, so every caller gets it when `v1` moves. To always run:
 
