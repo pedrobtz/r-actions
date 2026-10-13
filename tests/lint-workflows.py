@@ -36,6 +36,13 @@ UNGATED = {
 }
 GATE = "${{ !cancelled() && needs.changes.outputs.docs-only != 'true'"
 
+# The jobs that also run on a `metadata` change (DESCRIPTION, README.Rmd), so
+# that one still gets a check. Any other job using this gate would run the
+# full set on a version bump, which is what the scope exists to prevent.
+METADATA_GATED = {("r-cmd-check.yml", "runners")}
+METADATA_GATE = ("${{ !cancelled() && (needs.changes.outputs.docs-only != 'true' "
+                 "|| needs.changes.outputs.scope == 'metadata')")
+
 failures = []
 changes_jobs = {}
 
@@ -71,8 +78,9 @@ def check_gate(name, doc, call):
         needs = [needs] if isinstance(needs, str) else (needs or [])
         if "changes" not in needs:
             fail(name, f"job `{job}` does not `needs: changes`")
-        if not str(body.get("if", "")).startswith(GATE):
-            fail(name, f"job `{job}` must start its `if:` with `{GATE}`, "
+        gate = METADATA_GATE if (name, job) in METADATA_GATED else GATE
+        if not str(body.get("if", "")).startswith(gate):
+            fail(name, f"job `{job}` must start its `if:` with `{gate}`, "
                        f"so a failed or skipped gate runs it")
 
 

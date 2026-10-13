@@ -45,8 +45,12 @@ on:
           Anything else runs as before, `man/`, `vignettes/` and the `.md`
           snapshots under `tests/` included. So does every case where the
           changed files cannot be listed: a new branch, a force-push, an API
-          failure, a manual or scheduled run. See "Documentation-only
-          changes" in the README.
+          failure, a manual or scheduled run.
+
+          A change that also touches DESCRIPTION, README.Rmd or README.qmd,
+          and nothing else, runs the `quick-runners` legs alone -- one
+          Linux R-release check by default -- whatever `profile` says. See
+          "Documentation-only changes" in the README.
         type: boolean
         required: false
         default: true
@@ -326,6 +330,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       docs-only: ${{ steps.classify.outputs.docs-only }}
+      scope: ${{ steps.classify.outputs.scope }}
     steps:
       - name: Classify the changed files
         id: classify
@@ -341,9 +346,15 @@ jobs:
           FORCED: ${{ github.event.forced }}
         run: |
           # Anything short of a complete list of changed files, every one of
-          # them documentation, leaves this false and every job runs.
-          docs_only=false
-          trap 'echo "docs-only=$docs_only" >> "$GITHUB_OUTPUT"' EXIT
+          # them documentation or package metadata, leaves this false and
+          # every job runs.
+          #
+          # `scope` is `docs`, `metadata` or `code`. `docs-only` is true for
+          # the first two: every job gated on it skips both. r-cmd-check
+          # alone reads `scope`, and runs its quick runner legs for
+          # `metadata`, so a DESCRIPTION edit still gets one R CMD check.
+          docs_only=false scope=code
+          trap '{ echo "docs-only=$docs_only"; echo "scope=$scope"; } >> "$GITHUB_OUTPUT"' EXIT
 
           case "$EVENT" in
             pull_request|pull_request_target)
@@ -386,28 +397,45 @@ jobs:
           # and fixtures are .md -- and neither is Markdown under `fuzz/` or
           # `inst/`, so .md counts only at the top level or under a dot
           # directory, which a package does not ship.
-          all_docs=true
+          #
+          # DESCRIPTION and the README sources are `meta`: a version bump, a
+          # URL or a reworded Description is worth one check, not the
+          # sanitizers. README.Rmd is usually build-ignored, but it is
+          # executed to render README.md, so it is not treated as prose.
+          all_docs=true any_meta=false
           while IFS= read -r f; do
             case "$f" in
               _pkgdown.yml|_pkgdown.yaml|pkgdown/*) kind=docs ;;
+              DESCRIPTION|README.Rmd|README.qmd) kind=meta ;;
               .*/*.md) kind=docs ;;
               */*) kind=code ;;
               *.md) kind=docs ;;
               *) kind=code ;;
             esac
             printf '%-5s %s\n' "$kind" "$f"
-            [ "$kind" = docs ] || all_docs=false
+            case "$kind" in
+              docs) ;;
+              meta) any_meta=true ;;
+              *) all_docs=false ;;
+            esac
           done < <(tail -n +2 <<<"$files")
 
-          if [ "$all_docs" = true ]; then
-            docs_only=true
+          if [ "$all_docs" = true ] && [ "$any_meta" = true ]; then
+            docs_only=true scope=metadata
+            echo "Documentation and package metadata only: r-cmd-check runs its quick runner legs, and every other gated job is skipped." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$all_docs" = true ]; then
+            docs_only=true scope=docs
             echo "Documentation only: the jobs in this workflow are skipped." \
               | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
+  # The one job a `metadata` change runs, on the quick legs whatever the
+  # profile: a DESCRIPTION or README.Rmd edit gets a single check rather than
+  # none, and nothing beyond it.
   runners:
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.docs-only != 'true' && ((inputs.profile == 'quick' && inputs.quick-runners || inputs.runners) != '[]') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.docs-only != 'true' || needs.changes.outputs.scope == 'metadata') && (((inputs.profile == 'quick' || needs.changes.outputs.scope == 'metadata') && inputs.quick-runners || inputs.runners) != '[]') }}
     runs-on: ${{ matrix.config.os }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
@@ -416,7 +444,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        config: ${{ fromJson(inputs.profile == 'quick' && inputs.quick-runners || inputs.runners) }}
+        config: ${{ fromJson((inputs.profile == 'quick' || needs.changes.outputs.scope == 'metadata') && inputs.quick-runners || inputs.runners) }}
 
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
