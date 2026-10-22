@@ -200,8 +200,11 @@ jobs:
       # A green run proves nothing unless the trap is armed: a front end
       # built without -DTHREADCHECK, or an R without OpenMP, runs every
       # test on the main thread or checks no thread at all, and passes. So
-      # first make R allocate from a worker thread on purpose, and require
-      # it to die saying so. Run outside the checkout, so the probe cannot
+      # first make a worker thread call PROTECT on purpose, and require R to
+      # die saying so. PROTECT rather than an allocation: THREADCHECK guards
+      # the collector, PROTECT/UNPROTECT and R_PreserveObject/
+      # R_ReleaseObject, so an allocation is caught only when it happens to
+      # start a collection. Run outside the checkout, so the probe cannot
       # collide with the package's own files.
       - name: Verify the thread check is armed
         shell: bash
@@ -219,7 +222,10 @@ jobs:
           SEXP probe(void) {
           #pragma omp parallel num_threads(2)
             {
-              if (omp_get_thread_num() == 1) Rf_allocVector(INTSXP, 1);
+              if (omp_get_thread_num() == 1) {
+                PROTECT(R_NilValue);
+                UNPROTECT(1);
+              }
             }
             return R_NilValue;
           }
@@ -237,10 +243,10 @@ jobs:
           status=$?
           cat out.txt
           if [ "$status" -eq 0 ] || ! grep -q "Wrong thread" out.txt; then
-            echo "::error::$RTC did not stop an allocation from a worker thread, so this job would check nothing. Is it built with -DTHREADCHECK?"
+            echo "::error::$RTC did not stop PROTECT on a worker thread, so this job would check nothing. Is it built with -DTHREADCHECK?"
             exit 1
           fi
-          echo "The thread check is armed: $RTC stopped an allocation from a worker thread."
+          echo "The thread check is armed: $RTC stopped PROTECT on a worker thread."
 
       # Into the front end's own library. Suggests too: testthat and the
       # packages tests use are usually suggested.

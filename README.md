@@ -855,11 +855,13 @@ memory safety cost this job a great deal and tell it nothing.
 
 Runs the test suite under an R-devel built with `-DTHREADCHECK`, the
 `RDthreadcheck` build in [wch1/r-debug](https://github.com/wch/r-debug). That
-R remembers its main thread, and its memory manager (allocation and garbage
-collection) ends the process with `Wrong thread calling '...'` when another
-thread calls it. It is for packages that run C on several threads, usually
-with OpenMP. There, an allocation, a `PROTECT` or a `Rf_mkChar()` from a
-worker thread corrupts R only under load, and no other check here sees it.
+R remembers its main thread, and ends the process with
+`Wrong thread calling '...'` when another thread runs the garbage collector,
+`PROTECT` or `UNPROTECT`, or `R_PreserveObject()` or `R_ReleaseObject()`. An
+allocation from a worker thread is caught only when it starts a collection,
+which in a test suite of any size it eventually does. It is for packages that
+run C on several threads, usually with OpenMP, where such a call corrupts R
+only under load and no other check here sees it.
 
 ```yaml
 jobs:
@@ -867,7 +869,7 @@ jobs:
     uses: pedrobtz/r-actions/.github/workflows/threadcheck.yml@v1
 ```
 
-Before the tests, the job makes R allocate from a worker thread on purpose,
+Before the tests, the job calls `PROTECT` from a worker thread on purpose,
 and fails unless R stops it. So a green run means the trap was armed, not
 that the front end was an ordinary R.
 
