@@ -207,14 +207,12 @@ jobs:
         shell: bash
         run: |
           set -u
-          omp="$("$RTC" CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null || true)"
-          if [ -z "$omp" ]; then
-            echo "::error::$RTC has no OpenMP flags (SHLIB_OPENMP_CFLAGS is empty), so nothing would run on a worker thread to check."
-            exit 1
-          fi
           probe="$RUNNER_TEMP/threadcheck-probe"
           mkdir -p "$probe"
           cat > "$probe/probe.c" <<'CEOF'
+          #ifndef _OPENMP
+          #error "no OpenMP: nothing would run on a worker thread to check"
+          #endif
           #define R_NO_REMAP
           #include <Rinternals.h>
           #include <omp.h>
@@ -227,7 +225,14 @@ jobs:
           }
           CEOF
           cd "$probe"
-          PKG_CFLAGS="$omp" PKG_LIBS="$omp" "$RTC" CMD SHLIB probe.c
+          # The literal $(SHLIB_OPENMP_CFLAGS), for make to expand: `R CMD
+          # config` does not know that variable, and prints an error in its
+          # place (data.table's configure notes the same).
+          if ! PKG_CFLAGS='$(SHLIB_OPENMP_CFLAGS)' PKG_LIBS='$(SHLIB_OPENMP_CFLAGS)' \
+               "$RTC" CMD SHLIB probe.c; then
+            echo "::error::Could not build an OpenMP probe with $RTC; without OpenMP nothing runs on a worker thread to check."
+            exit 1
+          fi
           "$RTC" --no-save -s -e 'dyn.load("probe.so"); invisible(.Call("probe"))' > out.txt 2>&1
           status=$?
           cat out.txt
