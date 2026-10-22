@@ -239,8 +239,13 @@ jobs:
             echo "::error::Could not build an OpenMP probe with $RTC; without OpenMP nothing runs on a worker thread to check."
             exit 1
           fi
-          "$RTC" --no-save -s -e 'dyn.load("probe.so"); invisible(.Call("probe"))' > out.txt 2>&1
-          status=$?
+          # R_Suicide runs on the worker thread, so R may print its message
+          # and then crash (exit 139) rather than exit cleanly: any failing
+          # exit counts, as long as the message names the wrong thread. The
+          # step's shell has -e, hence the `|| status=$?`.
+          status=0
+          "$RTC" --no-save -s -e 'dyn.load("probe.so"); invisible(.Call("probe"))' > out.txt 2>&1 || status=$?
+          echo "R exited with status $status"
           cat out.txt
           if [ "$status" -eq 0 ] || ! grep -q "Wrong thread" out.txt; then
             echo "::error::$RTC did not stop PROTECT on a worker thread, so this job would check nothing. Is it built with -DTHREADCHECK?"
