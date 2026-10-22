@@ -851,6 +851,39 @@ sets `NOT_CRAN`, so anything behind `skip_on_cran()` *will* run here — and
 tests that check limits (row counts, column caps, file sizes) rather than
 memory safety cost this job a great deal and tell it nothing.
 
+### `threadcheck.yml` — R API calls from worker threads
+
+Runs the test suite under an R-devel built with `-DTHREADCHECK`, the
+`RDthreadcheck` build in [wch1/r-debug](https://github.com/wch/r-debug). That
+R remembers its main thread, and its memory manager (allocation and garbage
+collection) ends the process with `Wrong thread calling '...'` when another
+thread calls it. It is for packages that run C on several threads, usually
+with OpenMP. There, an allocation, a `PROTECT` or a `Rf_mkChar()` from a
+worker thread corrupts R only under load, and no other check here sees it.
+
+```yaml
+jobs:
+  threadcheck:
+    uses: pedrobtz/r-actions/.github/workflows/threadcheck.yml@v1
+```
+
+Before the tests, the job makes R allocate from a worker thread on purpose,
+and fails unless R stops it. So a green run means the trap was armed, not
+that the front end was an ordinary R.
+
+**It sees only code that runs on a worker thread.** A package that runs
+small inputs on one thread needs tests that cross its threshold, or a way to
+lower it, and a test environment that allows more than one thread. Pass any
+variables that switch those on through `env`.
+
+CRAN runs no such check, and neither ThreadSanitizer nor this replaces
+designing the parallel part without the R API. It is cheap insurance for a
+package that already does: about the cost of pulling the image and building
+the dependencies.
+
+The image is about 2.4 GB and is rebuilt by hand, so its R-devel can be old.
+`image` and `r` select another image and front end with the same layout.
+
 ### `rchk.yml` — rchk static analysis
 
 Runs [Tomas Kalibera's rchk](https://github.com/kalibera/rchk) static analyzer
