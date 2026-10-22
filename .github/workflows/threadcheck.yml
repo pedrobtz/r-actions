@@ -1,0 +1,295 @@
+on:
+  workflow_call:
+    inputs:
+      skip-docs-only:
+        description: >
+          Skip every job here when a push or pull request changes
+          documentation only: Markdown at the top level or under a dot
+          directory (`.github/`, `.agents/`), `_pkgdown.yml`, and `pkgdown/`.
+          Anything else runs as before, `man/`, `vignettes/` and the `.md`
+          snapshots under `tests/` included. So does every case where the
+          changed files cannot be listed: a new branch, a force-push, an API
+          failure, a manual or scheduled run.
+
+          DESCRIPTION, README.Rmd and README.qmd are skipped here too:
+          r-cmd-check gives such a change its one check. See
+          "Documentation-only changes" in the README.
+        type: boolean
+        required: false
+        default: true
+      image:
+        description: >
+          The container image holding an R built with `-DTHREADCHECK`. The
+          default, wch1/r-debug, carries several instrumented builds of
+          R-devel, one of them `RDthreadcheck`. It is about 2.4 GB and is
+          rebuilt by hand, not on a schedule, so its R-devel can be a year
+          old. That is fine for this check, which concerns which thread calls
+          R, not R-devel's newest behaviour. Point this at a fresher image
+          with the same layout when one exists.
+        type: string
+        required: false
+        default: wch1/r-debug:latest
+      r:
+        description: >
+          The R front end in `image` that was built with `-DTHREADCHECK`. It
+          has its own package library, so the job installs the dependencies
+          into it.
+        type: string
+        required: false
+        default: RDthreadcheck
+      timeout-minutes:
+        description: >
+          Job timeout in minutes. Most of the time goes on pulling the image
+          and building the dependencies from source in an unoptimised R.
+        type: number
+        required: false
+        default: 60
+      env:
+        description: >
+          Extra environment variables for the test step, one NAME=VALUE per
+          line, as in r-cmd-check.yml and gctorture.yml.
+
+          Use it to switch on tests that exercise the parallel paths: the
+          check only sees code that runs on a worker thread. Do not put
+          secrets here: workflow inputs are not masked in logs.
+        type: string
+        required: false
+        default: ""
+
+name: threadcheck
+
+# Nothing here writes through the token; see gctorture.yml for why this is
+# `contents: read` rather than `read-all`.
+permissions:
+  contents: read
+
+jobs:
+  # Skips the jobs below when a push or pull request changes documentation
+  # only; see the `skip-docs-only` input. Every workflow it gates carries an
+  # identical copy -- inline for the reason sanitizers.yml gives for not
+  # factoring out a composite action -- and tests/lint-workflows.py keeps the
+  # copies identical and the wiring complete.
+  #
+  # The gated jobs test `!cancelled()` in place of the implicit `success()`,
+  # so this job failing, or being skipped, runs them rather than dropping
+  # them. Only an explicit `docs-only=true` skips anything.
+  changes:
+    name: docs-only gate
+    if: inputs.skip-docs-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs-only: ${{ steps.classify.outputs.docs-only }}
+      scope: ${{ steps.classify.outputs.scope }}
+    steps:
+      - name: Classify the changed files
+        id: classify
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          FORCED: ${{ github.event.forced }}
+        run: |
+          # Anything short of a complete list of changed files, every one of
+          # them documentation or package metadata, leaves this false and
+          # every job runs.
+          #
+          # `scope` is `docs`, `metadata` or `code`. `docs-only` is true for
+          # the first two: every job gated on it skips both. r-cmd-check
+          # alone reads `scope`, and runs its quick runner legs for
+          # `metadata`, so a DESCRIPTION edit still gets one R CMD check.
+          docs_only=false scope=code
+          trap '{ echo "docs-only=$docs_only"; echo "scope=$scope"; } >> "$GITHUB_OUTPUT"' EXIT
+
+          case "$EVENT" in
+            pull_request|pull_request_target)
+              base=$PR_BASE head=$PR_HEAD ;;
+            push)
+              # `before` is all zeros for a new branch, and after a
+              # force-push it may no longer exist.
+              if [ "$FORCED" = true ] || [ -z "${BEFORE//0/}" ]; then
+                echo "New branch or force-push: no diff to go by, so everything runs."
+                exit 0
+              fi
+              base=$BEFORE head=$AFTER ;;
+            *)
+              echo "A $EVENT run has no changed files to go by, so everything runs."
+              exit 0 ;;
+          esac
+
+          # The compare API rather than the pull request's file list, which
+          # would need `pull-requests: read`: a scope the caller may not hold,
+          # and asking for one is a startup_failure. Three dots diff from the
+          # merge base, which for a pull request is exactly what it changes,
+          # from its first commit on.
+          # A rename is listed under its new name, with the old one in
+          # previous_filename; both count, or `git mv R/x.R x.md` reads as a
+          # documentation-only change.
+          if ! files=$(gh api "repos/$REPO/compare/$base...$head" \
+                         --jq '(.files // []) | length, (.[] | .filename, (.previous_filename // empty))'); then
+            echo "Could not list the changed files, so everything runs."
+            exit 0
+          fi
+
+          # compare lists at most 300 files and truncates silently past that.
+          count=$(head -n 1 <<<"$files")
+          if ! [[ $count =~ ^[0-9]+$ ]] || [ "$count" -eq 0 ] || [ "$count" -ge 300 ]; then
+            echo "Cannot rely on a list of '$count' changed files, so everything runs."
+            exit 0
+          fi
+
+          # Markdown in `tests/` is not documentation -- testthat snapshots
+          # and fixtures are .md -- and neither is Markdown under `fuzz/` or
+          # `inst/`, so .md counts only at the top level or under a dot
+          # directory, which a package does not ship.
+          #
+          # DESCRIPTION and the README sources are `meta`: a version bump, a
+          # URL or a reworded Description is worth one check, not the
+          # sanitizers. README.Rmd is usually build-ignored, but it is
+          # executed to render README.md, so it is not treated as prose.
+          all_docs=true any_meta=false
+          while IFS= read -r f; do
+            case "$f" in
+              _pkgdown.yml|_pkgdown.yaml|pkgdown/*) kind=docs ;;
+              DESCRIPTION|README.Rmd|README.qmd) kind=meta ;;
+              .*/*.md) kind=docs ;;
+              */*) kind=code ;;
+              *.md) kind=docs ;;
+              *) kind=code ;;
+            esac
+            printf '%-5s %s\n' "$kind" "$f"
+            case "$kind" in
+              docs) ;;
+              meta) any_meta=true ;;
+              *) all_docs=false ;;
+            esac
+          done < <(tail -n +2 <<<"$files")
+
+          if [ "$all_docs" = true ] && [ "$any_meta" = true ]; then
+            docs_only=true scope=metadata
+            echo "Documentation and package metadata only: r-cmd-check runs its quick runner legs, and every other gated job is skipped." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$all_docs" = true ]; then
+            docs_only=true scope=docs
+            echo "Documentation only: the jobs in this workflow are skipped." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  threadcheck:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs-only != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+
+    container:
+      image: ${{ inputs.image }}
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+      RTC: ${{ inputs.r }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # A green run proves nothing unless the trap is armed: a front end
+      # built without -DTHREADCHECK, or an R without OpenMP, runs every
+      # test on the main thread or checks no thread at all, and passes. So
+      # first make a worker thread call PROTECT on purpose, and require R to
+      # die saying so. PROTECT rather than an allocation: THREADCHECK guards
+      # the collector, PROTECT/UNPROTECT and R_PreserveObject/
+      # R_ReleaseObject, so an allocation is caught only when it happens to
+      # start a collection. Run outside the checkout, so the probe cannot
+      # collide with the package's own files.
+      - name: Verify the thread check is armed
+        shell: bash
+        run: |
+          set -u
+          probe="$RUNNER_TEMP/threadcheck-probe"
+          mkdir -p "$probe"
+          cat > "$probe/probe.c" <<'CEOF'
+          #ifndef _OPENMP
+          #error "no OpenMP: nothing would run on a worker thread to check"
+          #endif
+          #define R_NO_REMAP
+          #include <Rinternals.h>
+          #include <omp.h>
+          SEXP probe(void) {
+          #pragma omp parallel num_threads(2)
+            {
+              if (omp_get_thread_num() == 1) {
+                PROTECT(R_NilValue);
+                UNPROTECT(1);
+              }
+            }
+            return R_NilValue;
+          }
+          CEOF
+          cd "$probe"
+          # The literal $(SHLIB_OPENMP_CFLAGS), for make to expand: `R CMD
+          # config` does not know that variable, and prints an error in its
+          # place (data.table's configure notes the same).
+          if ! PKG_CFLAGS='$(SHLIB_OPENMP_CFLAGS)' PKG_LIBS='$(SHLIB_OPENMP_CFLAGS)' \
+               "$RTC" CMD SHLIB probe.c; then
+            echo "::error::Could not build an OpenMP probe with $RTC; without OpenMP nothing runs on a worker thread to check."
+            exit 1
+          fi
+          # R_Suicide runs on the worker thread, so R may print its message
+          # and then crash (exit 139) rather than exit cleanly: any failing
+          # exit counts, as long as the message names the wrong thread. The
+          # step's shell has -e, hence the `|| status=$?`.
+          status=0
+          "$RTC" --no-save -s -e 'dyn.load("probe.so"); invisible(.Call("probe"))' > out.txt 2>&1 || status=$?
+          echo "R exited with status $status"
+          cat out.txt
+          if [ "$status" -eq 0 ] || ! grep -q "Wrong thread" out.txt; then
+            echo "::error::$RTC did not stop PROTECT on a worker thread, so this job would check nothing. Is it built with -DTHREADCHECK?"
+            exit 1
+          fi
+          echo "The thread check is armed: $RTC stopped PROTECT on a worker thread."
+
+      # Into the front end's own library. Suggests too: testthat and the
+      # packages tests use are usually suggested.
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -eu
+          "$RTC" --no-save -s -e '
+            options(repos = c(CRAN = "https://cloud.r-project.org"), Ncpus = 4L)
+            for (p in c("remotes", "testthat", "pkgload")) {
+              if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
+            }
+            remotes::install_deps(".", dependencies = TRUE, upgrade = "never")'
+
+      - name: Apply caller environment
+        if: inputs.env != ''
+        shell: bash
+        env:
+          CALLER_ENV: ${{ inputs.env }}
+        run: |
+          set -eu
+          printf '%s\n' "$CALLER_ENV" | while IFS= read -r line; do
+            case "$line" in
+              ''|'#'*) continue ;;
+              *=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+              *) echo "Ignoring malformed env line: $line" >&2 ;;
+            esac
+          done
+
+      # A wrong-thread call ends R at once (R_Suicide), so it shows as a
+      # crash rather than a test failure. The output is kept to name it.
+      - name: Run tests under the thread check
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! "$RTC" --no-save -s -e 'testthat::test_local(stop_on_failure = TRUE)' 2>&1 | tee "$RUNNER_TEMP/tests.txt"; then
+            if grep -q "Wrong thread" "$RUNNER_TEMP/tests.txt"; then
+              echo "::error::R's memory manager was called from a thread other than the main one: $(grep -m1 'Wrong thread' "$RUNNER_TEMP/tests.txt")"
+            fi
+            exit 1
+          fi

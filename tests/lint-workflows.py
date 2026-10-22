@@ -26,7 +26,7 @@ WRITERS = {
 GATED = {
     "alloc-failure.yml", "analyzers.yml", "arch.yml", "cran-special.yml",
     "fuzz.yml", "gctorture.yml", "lto.yml", "r-cmd-check.yml", "rchk.yml",
-    "sanitizers.yml", "valgrind.yml",
+    "sanitizers.yml", "threadcheck.yml", "valgrind.yml",
 }
 UNGATED = {
     "coverage.yml": "its job summary and badge are wanted on every change",
