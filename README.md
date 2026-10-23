@@ -1060,7 +1060,14 @@ Seeds and a dictionary are what separate a fuzzer that spends its budget
 rediscovering the file format from one that starts inside it — a conformance
 suite the package already fetches for its tests is usually the best corpus
 available. The corpus is cached between runs, so short PR runs and a long
-scheduled one accumulate into one campaign.
+scheduled one accumulate into one campaign. A long run needs a longer job:
+raise `timeout-minutes` with `max-total-time`, ten minutes beyond it, or the
+job fails before it starts rather than being cancelled mid-run.
+
+```yaml
+      max-total-time: ${{ github.event_name == 'schedule' && 3600 || 300 }}
+      timeout-minutes: ${{ github.event_name == 'schedule' && 75 || 30 }}
+```
 
 A finding fails the job, and the input that caused it is uploaded as an
 artifact so it can be replayed.

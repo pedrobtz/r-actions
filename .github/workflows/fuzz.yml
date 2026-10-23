@@ -177,6 +177,12 @@ on:
         required: false
         default: false
       timeout-minutes:
+        description: >
+          Minutes before GitHub cancels the fuzz job. It has to cover
+          `max-total-time` plus the build and the corpus minimise and save,
+          so the job refuses to start unless it leaves ten minutes beyond
+          `max-total-time`: an hour of fuzzing needs at least 70. Raise the
+          two together.
         type: number
         required: false
         default: 30
@@ -319,6 +325,25 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
     steps:
+      # A budget longer than the job's timeout does not fail: GitHub cancels
+      # the job mid-run, so no finding is reported and the night's corpus is
+      # never saved. A grey "cancelled" is easy to read as noise, and one
+      # caller's nightly hour went unrun for ten days that way. Checked
+      # before anything is installed, so the mismatch costs seconds.
+      - name: Check the time budget
+        env:
+          MAX_TIME: ${{ inputs.max-total-time }}
+          TIMEOUT: ${{ inputs.timeout-minutes }}
+        run: |
+          set -eu
+          margin=600
+          if [ $((MAX_TIME + margin)) -gt $((TIMEOUT * 60)) ]; then
+            need=$(( (MAX_TIME + margin + 59) / 60 ))
+            echo "::error::max-total-time is ${MAX_TIME}s, but timeout-minutes is ${TIMEOUT}: the job would be cancelled before the fuzzer finishes. Set timeout-minutes to at least ${need}."
+            exit 1
+          fi
+          echo "fuzzing ${MAX_TIME}s inside a ${TIMEOUT}-minute job."
+
       - uses: actions/checkout@v7
 
       - name: Install clang
