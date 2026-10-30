@@ -52,35 +52,40 @@ on:
         default: ""
       badge-branch:
         description: >
-          Branch the `badge` job commits the SVG to. Empty, the default,
-          commits to the branch that triggered the run.
+          Branch the `badge` job commits the SVG to. `auto`, the default,
+          commits to the branch that triggered the run, unless that branch's
+          rules reject a direct push (a ruleset requiring pull requests,
+          status checks, signed commits or restricting updates) and the
+          repository has a gh-pages branch: then it commits to gh-pages.
+          Empty commits to the triggering branch unconditionally (the
+          behaviour before v1.25.0); any other value names the branch, which
+          must exist.
 
-          Set it when that branch takes no direct pushes. A ruleset requiring
-          pull requests on the default branch rejects the badge commit --
-          "Changes must be made through a pull request" -- so the job fails
-          after its retries on every push, and the badge freezes at its last
-          value. gh-pages is the natural target for a package with a pkgdown
-          site: it already takes bot pushes, and a default-branch ruleset
-          does not cover it.
+          Without that redirect a ruleset requiring pull requests rejects the
+          badge commit -- "Changes must be made through a pull request" --
+          so the job fails after its retries on every push, and the badge
+          freezes at its last value. gh-pages already takes bot pushes from a
+          pkgdown deploy, and a default-branch ruleset does not cover it.
+          Classic branch protection is not visible to the job's token, so a
+          branch protected that way still needs `badge-branch: gh-pages`.
 
-          The branch must exist. If a pkgdown deploy writes to the same
-          branch, it must not force-push: JamesIves'
-          github-pages-deploy-action does by default, and a badge commit
-          landing between its checkout and its push is silently overwritten.
-          Set `force: false` there, and keep `clean: false` or list the badge
-          under `clean-exclude`.
+          If a pkgdown deploy writes to the same branch, it must not
+          force-push: JamesIves' github-pages-deploy-action does by default,
+          and a badge commit landing between its checkout and its push is
+          silently overwritten. Set `force: false` there, and keep
+          `clean: false` or list the badge under `clean-exclude`.
         type: string
         required: false
-        default: ""
+        default: auto
       badge-path:
         description: >
-          Path of the SVG on the badge branch. The default suits a badge
-          committed next to the source; on a separate branch such as
-          gh-pages, a path outside .github reads better, e.g.
-          badges/coverage.svg.
+          Path of the SVG on the badge branch. `auto`, the default, is
+          badges/coverage.svg on a branch other than the triggering one
+          (gh-pages, typically) and .github/badges/coverage.svg when the
+          badge is committed next to the source.
         type: string
         required: false
-        default: .github/badges/coverage.svg
+        default: auto
 
 name: coverage
 
@@ -190,11 +195,50 @@ jobs:
       contents: write
 
     steps:
-      # An empty `ref` is checkout's own default, the triggering ref, so a
-      # caller that sets no badge-branch gets exactly what it got before.
+      # Where the badge goes. `auto` keeps the triggering branch unless its
+      # rules would reject this job's push, and only then moves to gh-pages,
+      # so a caller whose badge commits work today sees no change. Both
+      # questions go to the API rather than to git, because the checkout
+      # below needs the answer as its ref. An empty branch output is
+      # checkout's own default, the triggering ref.
+      - name: Resolve badge target
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ inputs.badge-branch }}
+          BADGE: ${{ inputs.badge-path }}
+        run: |
+          set -eu
+          if [ "$BRANCH" = "auto" ]; then
+            BRANCH=""
+            # Rule types that reject a bot's direct push of an unsigned
+            # commit; deletion, non_fast_forward and linear history do not.
+            blocking=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${GITHUB_REF_NAME}" \
+              --jq '[.[].type | select(. == "pull_request" or . == "required_status_checks" or . == "update" or . == "required_signatures" or . == "required_deployments")] | unique | join(",")' \
+              2>/dev/null || true)
+            if [ -n "$blocking" ]; then
+              if gh api "repos/${GITHUB_REPOSITORY}/branches/gh-pages" --silent 2>/dev/null; then
+                BRANCH=gh-pages
+                echo "${GITHUB_REF_NAME} rejects direct pushes (${blocking}); committing the badge to gh-pages."
+              else
+                echo "::warning::${GITHUB_REF_NAME} rejects direct pushes (${blocking}) and there is no gh-pages branch, so the badge commit will be rejected. Set badge-branch to a branch that takes bot pushes."
+              fi
+            fi
+          fi
+          if [ "$BADGE" = "auto" ]; then
+            if [ -n "$BRANCH" ] && [ "$BRANCH" != "$GITHUB_REF_NAME" ]; then
+              BADGE=badges/coverage.svg
+            else
+              BADGE=.github/badges/coverage.svg
+            fi
+          fi
+          echo "Badge: ${BADGE} on ${BRANCH:-$GITHUB_REF_NAME}"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "path=${BADGE}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.badge-branch }}
+          ref: ${{ steps.target.outputs.branch }}
 
       # Rendered here rather than fetched.
       #
@@ -234,7 +278,7 @@ jobs:
         env:
           PCT: ${{ needs.coverage.outputs.pct }}
           COLOR: ${{ needs.coverage.outputs.color }}
-          BADGE: ${{ inputs.badge-path }}
+          BADGE: ${{ steps.target.outputs.path }}
         run: |
           set -eu
           mkdir -p "$(dirname "$BADGE")"
@@ -301,13 +345,13 @@ jobs:
       # second time around, and the step succeeds without a commit.
       #
       # The push names its target rather than relying on a bare `git push`,
-      # because with badge-branch set the checkout is not the triggering
-      # branch; without it, the target is the triggering branch as before.
+      # because with a badge branch resolved the checkout is not the
+      # triggering branch; without one, the target is the triggering branch.
       - name: Commit coverage badge
         env:
           PCT: ${{ needs.coverage.outputs.pct }}
-          BADGE: ${{ inputs.badge-path }}
-          BADGE_BRANCH: ${{ inputs.badge-branch }}
+          BADGE: ${{ steps.target.outputs.path }}
+          BADGE_BRANCH: ${{ steps.target.outputs.branch }}
         run: |
           set -eu
 
