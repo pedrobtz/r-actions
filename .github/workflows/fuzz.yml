@@ -329,6 +329,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
+    # Job-wide, so the merge replays the corpus under the same rules the
+    # fuzzing found it under.
+    #
+    # halt_on_error: UBSan's checks recover by default -- print and carry on
+    # -- and libFuzzer counts only a death as a finding. Measured, clang 18:
+    # a target overflowing a signed int on 'X' fuzzed for 20s, printed the
+    # runtime error, wrote no crash file and exited 0. A runtime option
+    # rather than -fno-sanitize-recover, so it covers whatever groups the
+    # `sanitizers` input names, `integer` included, which `undefined` is not.
+    #
+    # max_malloc_fill_size: ASan fills new allocations with 0xbe, but only
+    # their first 4KiB by default; past that, memory nothing wrote reads as
+    # zero and an uninitialised read behaves as if it were initialised.
+    # Measured: byte 5000 of a malloc(8192) read 00 by default and be with
+    # this set.
+    #
+    # detect_stack_use_after_return: a pointer to a returned frame's locals
+    # is invisible to ASan without it.
+    env:
+      ASAN_OPTIONS: max_malloc_fill_size=1073741824:detect_stack_use_after_return=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
     steps:
       # A budget longer than the job's timeout does not fail: GitHub cancels
       # the job mid-run, so no finding is reported and the night's corpus is

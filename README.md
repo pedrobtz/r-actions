@@ -1087,7 +1087,13 @@ and a weekly run is enough. A large parser under active work is worth fuzzing
 nightly.
 
 A finding fails the job, and the input that caused it is uploaded as an
-artifact so it can be replayed.
+artifact so it can be replayed. That includes UBSan reports, which by default
+print and let the run carry on: the job sets `UBSAN_OPTIONS=halt_on_error=1`,
+so each one ends the run with a crash file. It also sets
+`ASAN_OPTIONS=max_malloc_fill_size=1073741824:detect_stack_use_after_return=1`,
+so ASan fills every byte of a new allocation rather than the first 4KiB, and
+catches pointers into frames that have returned. Replay a finding locally with
+the same two variables, or it may not reproduce.
 
 `embed-r: true` builds the target against an embedded R, for a harness whose
 code under test calls R's API (serialization hooks, SEXP glue): R is installed,
