@@ -1070,14 +1070,21 @@ Seeds and a dictionary are what separate a fuzzer that spends its budget
 rediscovering the file format from one that starts inside it — a conformance
 suite the package already fetches for its tests is usually the best corpus
 available. The corpus is cached between runs, so short PR runs and a long
-scheduled one accumulate into one campaign. A long run needs a longer job:
-raise `timeout-minutes` with `max-total-time`, ten minutes beyond it, or the
-job fails before it starts rather than being cancelled mid-run.
+scheduled one accumulate into one campaign. The job's default
+`timeout-minutes` of 75 fits up to an hour of fuzzing. A longer run needs it
+raised, ten minutes beyond `max-total-time`, or the job fails before it starts
+rather than being cancelled mid-run.
 
 ```yaml
-      max-total-time: ${{ github.event_name == 'schedule' && 3600 || 300 }}
-      timeout-minutes: ${{ github.event_name == 'schedule' && 75 || 30 }}
+      max-total-time: ${{ github.event_name == 'schedule' && 7200 || 300 }}
+      timeout-minutes: ${{ github.event_name == 'schedule' && 130 || 30 }}
 ```
+
+How often to schedule the long run depends on how much code is fuzzed and how
+often it changes. Every pull request already gets a short run, so a small or
+vendored target whose code rarely changes gets little from re-fuzzing nightly,
+and a weekly run is enough. A large parser under active work is worth fuzzing
+nightly.
 
 A finding fails the job, and the input that caused it is uploaded as an
 artifact so it can be replayed.

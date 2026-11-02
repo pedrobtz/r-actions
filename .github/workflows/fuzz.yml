@@ -181,11 +181,16 @@ on:
           Minutes before GitHub cancels the fuzz job. It has to cover
           `max-total-time` plus the build and the corpus minimise and save,
           so the job refuses to start unless it leaves ten minutes beyond
-          `max-total-time`: an hour of fuzzing needs at least 70. Raise the
-          two together.
+          `max-total-time`: an hour of fuzzing needs at least 70.
+
+          The default covers up to an hour of fuzzing, so only a longer run
+          needs this set. It is a ceiling, not a cost: a job that finishes
+          early stops early, and the higher limit only matters to a job that
+          hangs. At 30 it was below the usual nightly half hour, and
+          callers that set `max-total-time: 1800` alone failed every night.
         type: number
         required: false
-        default: 30
+        default: 75
 
 name: fuzz
 
