@@ -127,6 +127,7 @@ Optional inputs:
       timeout-minutes: 45                              # default
       env: |                                           # extra env for the check steps
         MYPKG_SLOW_TESTS=true
+      pre-install: Rscript tools/ci-binaries.R         # default empty; see below
       rust: false                                      # default; see below
       rust-workspace: src/rust                         # default; ignored unless rust
       allowed-warnings: |                              # default empty; see below
@@ -142,6 +143,40 @@ the `runners` job already does. `build-args` reaches the `runners` job only:
 the container images carry no LaTeX and no vignette-compaction tooling. The
 `nosuggests` job additionally builds with `--no-build-vignettes`, since that
 image installs no Suggests and so has no vignette engine to build with.
+
+#### `pre-install` — a heavy Suggests with no R-devel binary
+
+Every R-devel leg (the containers, `nold`, the UBSan legs and the ASan
+containers) installs the Suggests from source, because no repository these
+jobs use carries R-devel binaries for Linux. For most packages that costs
+minutes. For a few it does not fit at all: duckdb took 45 minutes on
+`clang23` and ran `ubsan (gcc)` out of its 60, in zuarrow's first run with
+it in Suggests.
+
+`pre-install` is a shell command run just before each of those jobs
+installs the package's dependencies, so a caller can put in a binary first.
+pak keeps an installed package that satisfies `DESCRIPTION` (`upgrade =
+FALSE`), and the install that follows leaves it alone.
+[cran.r-universe.dev](https://docs.r-universe.dev/install/binaries.html)
+builds Linux binaries of CRAN's releases for R-release and R-devel, on the
+distro the r-hub images use (`ubuntu:26.04`, "resolute") and on the runners'
+`noble`:
+
+```r
+# tools/ci-binaries.R
+if (R.version$status != "Under development (unstable)" ||
+    Sys.info()[["sysname"]] != "Linux") quit(save = "no")
+os <- readLines("/etc/os-release")
+codename <- sub(".*=", "", grep("^VERSION_CODENAME=", os, value = TRUE))
+rv <- paste(R.version$major, sub("[.].*", "", R.version$minor), sep = ".")
+repo <- sprintf("https://cran.r-universe.dev/bin/linux/%s-%s/%s/",
+                codename, R.version$arch, rv)
+install.packages("duckdb", repos = repo)
+```
+
+The command decides which legs it applies to; a leg it does nothing for,
+such as `gcc-asan` on Fedora, falls through to the ordinary install. It does
+not run in `nosuggests`, which exists to check without the Suggests.
 
 #### `rust: true` — R packages wrapping a Rust crate
 
@@ -374,6 +409,7 @@ jobs:
       ubsan-compilers: '["clang", "gcc"]'   # default; one leg each
       env: |                  # extra env for the check step
         MYPKG_SLOW_TESTS=true
+      pre-install: Rscript tools/ci-binaries.R   # default empty; as in r-cmd-check.yml
 ```
 
 #### How this maps to CRAN's checks
