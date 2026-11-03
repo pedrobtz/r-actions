@@ -17,6 +17,23 @@ on:
         type: boolean
         required: false
         default: true
+      pre-install:
+        description: >
+          A shell command run in the checkout, with bash, just before a job
+          installs the package's dependencies: in the UBSan legs and the ASan
+          containers. It is for what the dependency step would otherwise build
+          from source and cannot build in time: a heavy Suggests with no
+          binary for R-devel, such as duckdb, taken as a binary from
+          r-universe. pak keeps an installed package that
+          satisfies DESCRIPTION, so the later install leaves it alone.
+          Typically `Rscript tools/ci-binaries.R`. The command decides for
+          itself which jobs it applies to (by R version, OS or distro), and a
+          job it does nothing for falls through to the ordinary install.
+
+          Do not put secrets here: workflow inputs are not masked in logs.
+        type: string
+        required: false
+        default: ""
       env:
         description: >
           Extra environment variables for the check step, one NAME=VALUE per
@@ -431,6 +448,15 @@ jobs:
           r-version: ${{ inputs.r-version }}
           http-user-agent: release
 
+      - name: Run the caller's pre-install command
+        if: inputs.pre-install != ''
+        shell: bash
+        env:
+          PRE_INSTALL: ${{ inputs.pre-install }}
+        run: |
+          set -eu
+          bash -c "$PRE_INSTALL"
+
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           extra-packages: any::rcmdcheck
@@ -740,6 +766,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Run the caller's pre-install command
+        if: inputs.pre-install != ''
+        shell: bash
+        env:
+          PRE_INSTALL: ${{ inputs.pre-install }}
+        run: |
+          set -eu
+          bash -c "$PRE_INSTALL"
 
       # dependencies = TRUE, so Suggests are included: R CMD check reports a
       # missing Suggests as an ERROR, not a NOTE, and most of these images'
