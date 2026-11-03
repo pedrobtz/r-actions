@@ -892,6 +892,48 @@ jobs:
       timeout-minutes: 240
 ```
 
+A job that reaches `timeout-minutes` is *cancelled*, not failed. Its check
+turns grey, like a run a newer push superseded, and reads as noise.
+`test-timeout-minutes` gives the test run a budget of its own, below the job
+timeout. Past it the run is stopped and the job fails with an error that says
+so. 0, the default, sets no budget.
+
+#### Wide on pull requests, step 20 on a schedule
+
+Step 20 on every merge can still be an hour or two per merge. Another
+split is a wide step under a short budget on every pull request and push,
+and step 20 on a schedule, or by hand before a release:
+
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"   # daily while in active development; weekly after
+  workflow_dispatch:
+
+name: gctorture
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  gctorture:
+    uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@v1
+    with:
+      profile: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'full' || 'quick' }}
+      test-timeout-minutes: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 0 || 10 }}
+      timeout-minutes: 240
+```
+
+`gh workflow run gctorture.yaml --ref <branch>` runs step 20 on a branch:
+before a release, and before merging a change to `PROTECT`s or finalizers.
+A scheduled failure notifies only whoever last edited the `cron` line, and
+GitHub disables schedules after 60 days without repository activity, so pair
+the schedule with something that files an issue when the run fails.
+
 Prefer gating the heavy tests instead, where you can. `testthat::test_local()`
 sets `NOT_CRAN`, so anything behind `skip_on_cran()` *will* run here — and
 tests that check limits (row counts, column caps, file sizes) rather than
