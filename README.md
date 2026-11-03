@@ -892,10 +892,33 @@ jobs:
       timeout-minutes: 240
 ```
 
+A job that reaches `timeout-minutes` is *cancelled*, not failed. Its check
+turns grey, like a run a newer push superseded, and reads as noise.
+`test-timeout-minutes` gives the test run a budget of its own, below the job
+timeout. Past it the run is stopped and the job fails with an error that says
+so. 0, the default, sets no budget.
+
 Prefer gating the heavy tests instead, where you can. `testthat::test_local()`
 sets `NOT_CRAN`, so anything behind `skip_on_cran()` *will* run here — and
 tests that check limits (row counts, column caps, file sizes) rather than
 memory safety cost this job a great deal and tell it nothing.
+
+#### Wide on pull requests, step 20 on a schedule
+
+Step 20 on every merge can still cost an hour or two each time. Another
+split runs a wide step under a short budget on every pull request and push,
+and step 20 on a schedule, or by hand before a release.
+[`examples/gctorture.yml`](examples/gctorture.yml) does that: `quick` with
+`test-timeout-minutes: 10` on pushes and pull requests, `full` on `schedule`
+and `workflow_dispatch`, daily while in active development and weekly after.
+
+`gh workflow run gctorture.yml --ref <branch>` runs step 20 on a branch:
+before a release, and before merging a change to `PROTECT`s or finalizers.
+A scheduled failure notifies only whoever last edited the `cron` line, and
+GitHub disables schedules after 60 days without repository activity. So the
+example's `report` job keeps one issue, labelled `gctorture`, open while the
+scheduled run is red, and closes it on the next green run. It is the only job
+there with a write scope, `issues: write`.
 
 ### `threadcheck.yml` — R API calls from worker threads
 
@@ -1657,10 +1680,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
-# `profile` goes to the four workflows it changes: quick skips the asan
-# containers, valgrind and cran-special, and runs gctorture at step 500
-# instead of 20. lto, rchk and analyzers take minutes either way and run on
-# every push.
+# `profile` goes to the three workflows it changes: quick skips the asan
+# containers, valgrind and cran-special. lto, rchk and analyzers take minutes
+# either way and run on every push. gctorture has its own caller,
+# gctorture.yml, with step 20 on a schedule.
 jobs:
   sanitizers:
     uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
@@ -1676,11 +1699,6 @@ jobs:
   lto:
     uses: pedrobtz/r-actions/.github/workflows/lto.yml@v1
 
-  gctorture:
-    uses: pedrobtz/r-actions/.github/workflows/gctorture.yml@v1
-    with:
-      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
-
   rchk:
     uses: pedrobtz/r-actions/.github/workflows/rchk.yml@v1
 
@@ -1693,8 +1711,13 @@ jobs:
       profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
 ```
 
-All seven jobs appear under a single workflow run in the GitHub UI and execute
+All six jobs appear under a single workflow run in the GitHub UI and execute
 in parallel.
+
+Copy [`examples/gctorture.yml`](examples/gctorture.yml) as well, as
+`.github/workflows/gctorture.yml`. It runs gctorture at the wide step under a
+10-minute budget on every push, and at step 20 on a schedule that files an
+issue when it fails; see [Wide on pull requests, step 20 on a schedule](#wide-on-pull-requests-step-20-on-a-schedule).
 
 ### Run a subset
 
