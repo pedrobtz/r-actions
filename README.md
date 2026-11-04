@@ -1450,6 +1450,57 @@ rather than dropped.
 
 ## Usage
 
+### `cran-release.yml` — tag what was submitted to CRAN
+
+Tags the submitted commit and opens the development-version bump, from the
+`CRAN-SUBMISSION` file `devtools::submit_cran()` writes. Commit that file after
+submitting, and the push is the whole release step:
+
+1. The commit named by the file's `SHA` is tagged with the bare version
+   (`0.1.0`, not `v0.1.0`), after checking that its `DESCRIPTION` carries the
+   file's `Version`.
+2. The `<pkg> <version>` release is created, with that version's `NEWS.md`
+   section, taken from the submitted commit, as its notes.
+3. A `[skip ci]` pull request bumps the default branch to `<version>.9000`
+   and adds `# <pkg> (development version)` to `NEWS.md`. Merge it once CRAN
+   accepts. It is skipped when the default branch has already moved off the
+   submitted version.
+
+**A resubmission of the same version moves the tag.** `submit_cran()` writes
+a new `SHA`, and committing it re-tags, refreshes the release and rebuilds the
+bump branch. No check against CRAN is needed: CRAN refuses a version it
+already publishes, so only the newest submission of a version can be the one
+it accepted.
+
+```yaml
+on:
+  push:
+    paths: [CRAN-SUBMISSION]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  cran-release:
+    uses: pedrobtz/r-actions/.github/workflows/cran-release.yml@v1
+```
+
+Two settings on the caller's side:
+
+* `CRAN-SUBMISSION` belongs in `.Rbuildignore`, **not** `.gitignore` (where
+  `usethis` templates often put it). Ignored, the submitted SHA exists on one
+  laptop only, and a release done from anywhere else has nothing to tag.
+* The bump needs *Settings → Actions → General → Allow GitHub Actions to
+  create and approve pull requests*. Without it the tag and release are made
+  and the last step fails; pass `bump: false` to skip it instead.
+
+| input | default | |
+|---|---|---|
+| `file` | `CRAN-SUBMISSION` | path of the submission record |
+| `bump` | `true` | open the `<version>.9000` pull request |
+
 ### Quick on pull requests, full after merge
 
 Run everything on every push to a pull request and one job decides how long
