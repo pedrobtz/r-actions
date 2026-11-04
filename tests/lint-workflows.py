@@ -16,6 +16,7 @@ WORKFLOWS = pathlib.Path(".github/workflows")
 # one needs. Anything else must be read-only.
 WRITERS = {
     "coverage.yml": {"contents": "write"},
+    "cran-release.yml": {"contents": "write", "pull-requests": "write"},
     "release.yml": {"contents": "write"},
     "vendor-upstream.yml": {"contents": "read", "issues": "write"},
 }
@@ -29,6 +30,7 @@ GATED = {
     "sanitizers.yml", "threadcheck.yml", "valgrind.yml",
 }
 UNGATED = {
+    "cran-release.yml": "it runs on a push that changes CRAN-SUBMISSION, never on a diff of code",
     "coverage.yml": "its job summary and badge are wanted on every change",
     "revdep.yml": "callers trigger it on the paths consumers see, and on a schedule",
     "vendor.yml": "it matches its own paths and takes seconds",

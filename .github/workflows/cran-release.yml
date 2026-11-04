@@ -1,0 +1,237 @@
+# Tags a CRAN submission and opens the development-version bump.
+#
+# The trigger is the commit of `CRAN-SUBMISSION`, the file
+# `devtools::submit_cran()` writes when a submission is confirmed. The caller
+# runs this on a push that changes it, so committing the file is the whole
+# release step:
+#
+#   * the submitted commit -- the file's `SHA` -- is tagged with the bare
+#     version (`0.1.0`, not `v0.1.0`), and the `<pkg> <version>` release is
+#     created with that version's NEWS.md section as its notes;
+#   * a pull request bumps the default branch to `<version>.9000` and adds
+#     the development-version NEWS heading.
+#
+# The file stays committed: it is the record of what was last submitted, and
+# the next `submit_cran()` overwriting it is what triggers the next release.
+#
+# A resubmission of the same version writes a new file with a new `SHA`, and
+# committing it moves the tag and refreshes the release. That is safe without
+# asking CRAN: CRAN refuses a version it already publishes, so the newest
+# submission of a version is the only one it can have accepted.
+#
+# This replaced a manual step that got skipped. zukomp 0.1.0 was on CRAN for
+# three weeks with no tag: the post-release session ran from a fresh clone,
+# `CRAN-SUBMISSION` was git-ignored, and nothing recorded which commit had been
+# submitted.
+on:
+  workflow_call:
+    inputs:
+      file:
+        description: >
+          Path of the submission record, relative to the repository root.
+        type: string
+        required: false
+        default: CRAN-SUBMISSION
+      bump:
+        description: >
+          Open the pull request that bumps the default branch to
+          `<version>.9000`. It is skipped,
+          with a notice, when the default branch's DESCRIPTION no longer
+          carries the submitted version -- someone has already bumped it.
+        type: boolean
+        required: false
+        default: true
+
+name: cran-release
+
+# The tag and the release are writes to contents; the bump is a pull request.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: tag the submission
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FILE: ${{ inputs.file }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Read the submission record
+        id: record
+        run: |
+          set -euo pipefail
+          # Deleting the record changes the watched path too. That run has
+          # nothing to do.
+          if [ ! -f "$FILE" ]; then
+            echo "::notice::${FILE} is absent; nothing to release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          field() { sed -n "s/^$1:[[:space:]]*//p" "$FILE" | head -1 | tr -d '\r'; }
+          version="$(field Version)"
+          sha="$(field SHA)"
+          date="$(field Date)"
+          if [ -z "$version" ] || [ -z "$sha" ]; then
+            echo "::error file=${FILE}::needs both a Version: and a SHA: line."
+            exit 1
+          fi
+          if ! [[ $version =~ ^[0-9]+([.-][0-9]+)+$ ]]; then
+            echo "::error file=${FILE}::Version '${version}' is not an R package version."
+            exit 1
+          fi
+
+          # The SHA is the commit devtools saw at submission. It has to be
+          # pushed, and it has to be the commit that carries this version --
+          # a hand-edited or stale record would otherwise tag the wrong code.
+          if ! full="$(git rev-parse --verify --quiet "${sha}^{commit}")"; then
+            echo "::error file=${FILE}::SHA ${sha} is not a commit in this repository; push the submitted commit."
+            exit 1
+          fi
+          sha="$full"
+          desc="$(git show "${sha}:DESCRIPTION")"
+          pkg="$(sed -n 's/^Package:[[:space:]]*//p' <<<"$desc" | tr -d '\r')"
+          at_sha="$(sed -n 's/^Version:[[:space:]]*//p' <<<"$desc" | tr -d '\r')"
+          if [ "$at_sha" != "$version" ]; then
+            echo "::error file=${FILE}::DESCRIPTION at ${sha:0:8} has Version ${at_sha}, not ${version}."
+            exit 1
+          fi
+
+          {
+            echo "skip=false"
+            echo "pkg=${pkg}"
+            echo "version=${version}"
+            echo "sha=${sha}"
+            echo "date=${date}"
+          } >> "$GITHUB_OUTPUT"
+          echo "${pkg} ${version} was submitted from ${sha:0:8}${date:+ on ${date}}."
+
+      - name: Tag the submitted commit
+        if: steps.record.outputs.skip != 'true'
+        env:
+          PKG: ${{ steps.record.outputs.pkg }}
+          VERSION: ${{ steps.record.outputs.version }}
+          SHA: ${{ steps.record.outputs.sha }}
+        run: |
+          set -euo pipefail
+          current="$(git rev-list -n1 "refs/tags/${VERSION}" 2>/dev/null || true)"
+          if [ "$current" = "$SHA" ]; then
+            echo "${VERSION} already points at ${SHA:0:8}."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f -a "$VERSION" "$SHA" -m "${PKG} ${VERSION}"
+          if [ -n "$current" ]; then
+            # A resubmission of the same version: move the tag to it.
+            git push --force origin "refs/tags/${VERSION}"
+            echo "::notice::Moved ${VERSION} from ${current:0:8} to ${SHA:0:8} (resubmission)."
+          else
+            git push origin "refs/tags/${VERSION}"
+            echo "Tagged ${SHA:0:8} as ${VERSION}."
+          fi
+
+      - name: Create or refresh the release
+        if: steps.record.outputs.skip != 'true'
+        env:
+          PKG: ${{ steps.record.outputs.pkg }}
+          VERSION: ${{ steps.record.outputs.version }}
+          SHA: ${{ steps.record.outputs.sha }}
+          DATE: ${{ steps.record.outputs.date }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/notes.md"
+
+          # The NEWS section for this version, from the submitted commit: the
+          # first level-one heading naming the version as a whole word, up to
+          # the next level-one heading. Leading and trailing blank lines go.
+          section=""
+          if git cat-file -e "${SHA}:NEWS.md" 2>/dev/null; then
+            section="$(git show "${SHA}:NEWS.md" | awk -v v="$VERSION" '
+              function names(line,   i, before, after) {
+                i = index(line, v)
+                if (!i) return 0
+                before = substr(line, i - 1, 1); after = substr(line, i + length(v), 1)
+                return before !~ /[0-9.]/ && after !~ /[0-9.]/
+              }
+              /^# / { if (found) exit; if (names($0)) { found = 1; next } }
+              found' | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba' -e '}')"
+          fi
+          if [ -z "$section" ]; then
+            echo "::warning::NEWS.md at ${SHA:0:8} has no section for ${VERSION}; the release notes say so."
+            section="_NEWS.md has no section for this version._"
+          fi
+
+          {
+            echo "Version ${VERSION} as submitted to CRAN."
+            echo
+            echo "* **Submitted:** ${DATE:-unknown}"
+            echo "* **Commit:** ${SHA}"
+            echo "* **CRAN:** <https://CRAN.R-project.org/package=${PKG}>"
+            echo
+            echo "## Changes"
+            echo
+            printf '%s\n' "$section"
+          } > "$notes"
+
+          if gh release view "$VERSION" --repo "$REPO" >/dev/null 2>&1; then
+            gh release edit "$VERSION" --repo "$REPO" \
+              --title "${PKG} ${VERSION}" --notes-file "$notes"
+            echo "Refreshed the ${PKG} ${VERSION} release."
+          else
+            gh release create "$VERSION" --repo "$REPO" --verify-tag \
+              --title "${PKG} ${VERSION}" --notes-file "$notes"
+            echo "Created the ${PKG} ${VERSION} release."
+          fi
+
+      - name: Open the development-version pull request
+        if: steps.record.outputs.skip != 'true' && inputs.bump
+        env:
+          PKG: ${{ steps.record.outputs.pkg }}
+          VERSION: ${{ steps.record.outputs.version }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          branch="post-release-${VERSION}"
+          dev="${VERSION}.9000"
+
+          git fetch --quiet origin "$BASE"
+          git switch --quiet --force-create "$branch" "origin/${BASE}"
+
+          on_base="$(sed -n 's/^Version:[[:space:]]*//p' DESCRIPTION | tr -d '\r')"
+          if [ "$on_base" != "$VERSION" ]; then
+            echo "::notice::${BASE} is at ${on_base}, not ${VERSION}; leaving the version alone."
+            exit 0
+          fi
+
+          sed "s/^Version:.*/Version: ${dev}/" DESCRIPTION > "$RUNNER_TEMP/DESCRIPTION"
+          mv "$RUNNER_TEMP/DESCRIPTION" DESCRIPTION
+          heading="# ${PKG} (development version)"
+          if [ -f NEWS.md ] && [ "$(grep -m1 '^# ' NEWS.md || true)" != "$heading" ]; then
+            printf '%s\n\n' "$heading" | cat - NEWS.md > "$RUNNER_TEMP/NEWS.md"
+            mv "$RUNNER_TEMP/NEWS.md" NEWS.md
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --quiet -am "Post-release: ${PKG} ${dev} [skip ci]"
+          # A resubmission rebuilds the branch from the new default branch.
+          git push --quiet --force origin "HEAD:refs/heads/${branch}"
+
+          if [ -n "$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            echo "Updated the open ${branch} pull request."
+          else
+            gh pr create --repo "$REPO" --base "$BASE" --head "$branch" \
+              --title "Post-release: ${PKG} ${VERSION} [skip ci]" \
+              --body "Development version after submitting ${PKG} ${VERSION} to CRAN: \`${dev}\` and the \`NEWS.md\` heading for it.
+
+          Merge it once CRAN has accepted ${VERSION}. A resubmission before then moves the \`${VERSION}\` tag and rebuilds this branch."
+          fi
