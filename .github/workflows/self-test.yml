@@ -39,6 +39,20 @@ jobs:
           /tmp/lint/bin/pip install --quiet pyyaml
           /tmp/lint/bin/python tests/lint-workflows.py
 
+  gate:
+    name: changes gate decides labels, profile and files
+    # A wrong answer from the gate fails nothing: it either skips a check
+    # that should have run, or runs one that need not. Only a table of cases
+    # notices either.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the gate through its cases
+        run: |
+          python3 -m venv /tmp/gate
+          /tmp/gate/bin/pip install --quiet pyyaml
+          PATH="/tmp/gate/bin:$PATH" bash tests/check-gate.sh
+
   alloc-interposer:
     name: alloc-failure interposer is transparent
     # The one piece of C this repository ships. It sits in a heredoc inside
