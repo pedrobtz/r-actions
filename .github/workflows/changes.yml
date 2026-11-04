@@ -1,0 +1,248 @@
+# The `changes` gate on its own, for a package's local workflows.
+#
+# Every gated workflow here carries the same `changes` job, which decides from
+# the changed files and the pull request's labels whether its jobs run. A
+# workflow that is not in r-actions -- a package's own fuzz or ABI job -- gets
+# the same decision by calling this and gating its jobs on the outputs:
+#
+#   jobs:
+#     changes:
+#       uses: pedrobtz/r-actions/.github/workflows/changes.yml@v1
+#       with:
+#         name: fuzz
+#     fuzz:
+#       needs: changes
+#       if: ${{ !cancelled() && needs.changes.outputs.docs-only != 'true' }}
+#
+# That replaces a hand-written `paths-ignore` list, which follows none of the
+# labels and drifts from the gate's rules one copy at a time.
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: >
+          The calling workflow's name in the `skip-ci:<name>` label: with
+          `name: fuzz`, a pull request labelled `skip-ci:fuzz` reports
+          `docs-only` as true.
+        type: string
+        required: true
+      skip-docs-only:
+        description: >
+          Consult the changed files, by the same rules as every other gated
+          workflow here. `false` leaves only the labels.
+        type: boolean
+        required: false
+        default: true
+      profile:
+        description: >
+          Resolved into the `profile` output: `auto` is `quick` on a pull
+          request and `full` on every other event and on a pull request
+          labelled `full-ci`. `quick` stays quick; anything else is `full`.
+        type: string
+        required: false
+        default: full
+    outputs:
+      docs-only:
+        description: "`true` when the caller's jobs should be skipped."
+        value: ${{ jobs.changes.outputs.docs-only }}
+      scope:
+        description: "`docs`, `metadata` or `code`."
+        value: ${{ jobs.changes.outputs.scope }}
+      profile:
+        description: "`quick` or `full`."
+        value: ${{ jobs.changes.outputs.profile }}
+
+name: changes
+
+permissions:
+  contents: read
+
+# Read by the `changes` job, which is identical in every workflow that
+# carries it: the name in its `skip-ci:<name>` label, and the profile it resolves.
+env:
+  R_ACTIONS_WORKFLOW: ${{ inputs.name }}
+  R_ACTIONS_PROFILE: ${{ inputs.profile }}
+
+jobs:
+  changes:
+    name: docs-only gate
+    # It always runs, because it also resolves `profile` and reads the pull
+    # request's labels. `skip-docs-only: false` turns off the file rules
+    # only; a label on a pull request is a decision someone made about that
+    # pull request, and still applies.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs-only: ${{ steps.classify.outputs.docs-only }}
+      scope: ${{ steps.classify.outputs.scope }}
+      profile: ${{ steps.classify.outputs.profile }}
+    steps:
+      - name: Classify the changed files and the labels
+        id: classify
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          FORCED: ${{ github.event.forced }}
+          FILE_RULES: ${{ inputs.skip-docs-only }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          # R_ACTIONS_WORKFLOW (the name in `skip-ci:<name>`) and
+          # R_ACTIONS_PROFILE (the `profile` input, where there is one) come
+          # from the workflow-level `env`, so that this job stays identical
+          # in every workflow that carries it.
+        run: |
+          # Anything short of a complete list of changed files, every one of
+          # them documentation or package metadata, leaves this false and
+          # every job runs -- unless a label on the pull request says
+          # otherwise.
+          #
+          # `scope` is `docs`, `metadata` or `code`. `docs-only` is true for
+          # the first two: every job gated on it skips both. r-cmd-check
+          # alone reads `scope`, and runs its quick runner legs for
+          # `metadata`, so a DESCRIPTION edit still gets one R CMD check.
+          docs_only=false scope=code profile=full
+          trap '{ echo "docs-only=$docs_only"; echo "scope=$scope"; echo "profile=$profile"; } >> "$GITHUB_OUTPUT"' EXIT
+
+          is_pr=false
+          case "$EVENT" in pull_request|pull_request_target) is_pr=true ;; esac
+          labels=""
+          if [ "$is_pr" = true ]; then
+            labels=$(jq -r '.[]?' <<<"$LABELS" 2>/dev/null || true)
+          fi
+          has_label() { grep -qxF -- "$1" <<<"$labels"; }
+
+          # `auto` is quick on a pull request and full everywhere else, and
+          # the `full-ci` label makes a pull request full. Any other value
+          # keeps its old meaning: `quick` is quick, anything else is full.
+          case "${R_ACTIONS_PROFILE:-full}" in
+            auto)
+              if [ "$is_pr" = true ] && ! has_label full-ci; then profile=quick; fi ;;
+            quick) profile=quick ;;
+          esac
+          echo "profile: $profile"
+
+          # Labels change pull request runs only. The push after merge
+          # carries none and is classified by its files, so anything a label
+          # skips here still runs on the default branch. `full-ci` asks for
+          # more checking, so it overrides every label that asks for less.
+          if [ -n "$labels" ] && ! has_label full-ci; then
+            if [ -n "${R_ACTIONS_WORKFLOW:-}" ] && has_label "skip-ci:${R_ACTIONS_WORKFLOW}"; then
+              docs_only=true scope=docs
+              echo "Skipped by the \`skip-ci:${R_ACTIONS_WORKFLOW}\` label: every job in this workflow is skipped on this pull request." \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            if has_label ci:minimal; then
+              docs_only=true scope=metadata
+              echo "Reduced by the \`ci:minimal\` label: r-cmd-check runs its quick runner legs, and every other gated job is skipped on this pull request." \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
+
+          if [ "$FILE_RULES" != true ]; then
+            echo "skip-docs-only is false, so the changed files are not consulted."
+            exit 0
+          fi
+
+          case "$EVENT" in
+            pull_request|pull_request_target)
+              base=$PR_BASE head=$PR_HEAD ;;
+            push)
+              # `before` is all zeros for a new branch, and after a
+              # force-push it may no longer exist.
+              if [ "$FORCED" = true ] || [ -z "${BEFORE//0/}" ]; then
+                echo "New branch or force-push: no diff to go by, so everything runs."
+                exit 0
+              fi
+              base=$BEFORE head=$AFTER ;;
+            *)
+              echo "A $EVENT run has no changed files to go by, so everything runs."
+              exit 0 ;;
+          esac
+
+          # The compare API rather than the pull request's file list, which
+          # would need `pull-requests: read`: a scope the caller may not hold,
+          # and asking for one is a startup_failure. Three dots diff from the
+          # merge base, which for a pull request is exactly what it changes,
+          # from its first commit on.
+          # A rename is listed under its new name, with the old one in
+          # previous_filename; both count, or `git mv R/x.R x.md` reads as a
+          # documentation-only change.
+          if ! files=$(gh api "repos/$REPO/compare/$base...$head" \
+                         --jq '(.files // []) | length, (.[] | .filename, (.previous_filename // empty))'); then
+            echo "Could not list the changed files, so everything runs."
+            exit 0
+          fi
+
+          # compare lists at most 300 files and truncates silently past that.
+          count=$(head -n 1 <<<"$files")
+          if ! [[ $count =~ ^[0-9]+$ ]] || [ "$count" -eq 0 ] || [ "$count" -ge 300 ]; then
+            echo "Cannot rely on a list of '$count' changed files, so everything runs."
+            exit 0
+          fi
+
+          # The caller's own workflow file. In a called workflow
+          # `github.workflow_ref` is the caller's, `<repo>/<path>@<ref>`. An
+          # edit to that file is code -- a CI change has to test itself --
+          # while an edit to any other workflow in the repository changes
+          # nothing this workflow runs. If the ref is not in that shape,
+          # every workflow file counts as code.
+          caller=""
+          case "$WORKFLOW_REF" in
+            "$REPO"/*@*) caller=${WORKFLOW_REF#"$REPO"/}; caller=${caller%%@*} ;;
+          esac
+
+          # Markdown in `tests/` is not documentation -- testthat snapshots
+          # and fixtures are .md -- and neither is Markdown under `fuzz/` or
+          # `inst/`, so .md counts only at the top level or under a dot
+          # directory, which a package does not ship.
+          #
+          # Repository housekeeping counts as documentation too: nothing here
+          # builds, installs or checks it. CRAN-SUBMISSION is
+          # devtools::submit_cran()'s record of the submitted commit, and
+          # .gitignore changes what git tracks, not what R CMD build ships
+          # (that is .Rbuildignore, which is code).
+          #
+          # DESCRIPTION and the README sources are `meta`: a version bump, a
+          # URL or a reworded Description is worth one check, not the
+          # sanitizers. README.Rmd is usually build-ignored, but it is
+          # executed to render README.md, so it is not treated as prose.
+          all_docs=true any_meta=false
+          while IFS= read -r f; do
+            case "$f" in
+              _pkgdown.yml|_pkgdown.yaml|pkgdown/*) kind=docs ;;
+              DESCRIPTION|README.Rmd|README.qmd) kind=meta ;;
+              CRAN-SUBMISSION|.gitignore|CODEOWNERS|.github/CODEOWNERS) kind=docs ;;
+              .github/ISSUE_TEMPLATE/*|.github/PULL_REQUEST_TEMPLATE*) kind=docs ;;
+              .github/dependabot.yml|.github/dependabot.yaml|.github/FUNDING.yml) kind=docs ;;
+              .github/workflows/*)
+                if [ -n "$caller" ] && [ "$f" != "$caller" ]; then kind=docs; else kind=code; fi ;;
+              .*/*.md) kind=docs ;;
+              */*) kind=code ;;
+              *.md) kind=docs ;;
+              *) kind=code ;;
+            esac
+            printf '%-5s %s\n' "$kind" "$f"
+            case "$kind" in
+              docs) ;;
+              meta) any_meta=true ;;
+              *) all_docs=false ;;
+            esac
+          done < <(tail -n +2 <<<"$files")
+
+          if [ "$all_docs" = true ] && [ "$any_meta" = true ]; then
+            docs_only=true scope=metadata
+            echo "Documentation and package metadata only: r-cmd-check runs its quick runner legs, and every other gated job is skipped." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$all_docs" = true ]; then
+            docs_only=true scope=docs
+            echo "Documentation only: the jobs in this workflow are skipped." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi

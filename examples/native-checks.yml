@@ -2,7 +2,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 name: native-checks
 
@@ -19,12 +19,12 @@ jobs:
     uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
     with:
       asan: true
-      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
+      profile: auto
 
   valgrind:
     uses: pedrobtz/r-actions/.github/workflows/valgrind.yml@v1
     with:
-      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
+      profile: auto
 
   lto:
     uses: pedrobtz/r-actions/.github/workflows/lto.yml@v1
@@ -38,4 +38,4 @@ jobs:
   cran-special:
     uses: pedrobtz/r-actions/.github/workflows/cran-special.yml@v1
     with:
-      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
+      profile: auto

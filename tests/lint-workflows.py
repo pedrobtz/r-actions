@@ -25,7 +25,7 @@ WRITERS = {
 # `changes` job in each, and the reusable workflows that deliberately run
 # anyway. A new reusable workflow must be put in one or the other.
 GATED = {
-    "alloc-failure.yml", "analyzers.yml", "arch.yml", "cran-special.yml",
+    "alloc-failure.yml", "analyzers.yml", "arch.yml", "changes.yml", "cran-special.yml",
     "fuzz.yml", "gctorture.yml", "lto.yml", "r-cmd-check.yml", "rchk.yml",
     "sanitizers.yml", "threadcheck.yml", "valgrind.yml",
 }
@@ -72,6 +72,29 @@ def check_gate(name, doc, call):
         fail(name, "is gated but has no `changes` job")
         return
     changes_jobs[name] = jobs["changes"]
+
+    # The `changes` job is identical everywhere, so what differs -- the name
+    # in its `skip-ci:<name>` label, and the profile it resolves -- comes in
+    # through the workflow-level env. A copy pasted from another workflow
+    # with the env left as it was would answer to the other workflow's label.
+    env = doc.get("env") or {}
+    want = "${{ inputs.name }}" if name == "changes.yml" else name.removesuffix(".yml")
+    if env.get("R_ACTIONS_WORKFLOW") != want:
+        fail(name, f"needs `env: R_ACTIONS_WORKFLOW: {want}`, the name its "
+                   f"`skip-ci:` label uses")
+    if "profile" in inputs:
+        if env.get("R_ACTIONS_PROFILE") != "${{ inputs.profile }}":
+            fail(name, "has a `profile` input, so needs `env: "
+                       "R_ACTIONS_PROFILE: ${{ inputs.profile }}` for the "
+                       "`changes` job to resolve")
+        # Jobs read the resolved profile; the raw input does not know `auto`.
+        for job, body in jobs.items():
+            if job != "changes" and "inputs.profile" in yaml.safe_dump(body):
+                fail(name, f"job `{job}` reads `inputs.profile`; use "
+                           f"`needs.changes.outputs.profile`, which resolves "
+                           f"`auto` and the `full-ci` label")
+    elif "R_ACTIONS_PROFILE" in env:
+        fail(name, "sets R_ACTIONS_PROFILE but has no `profile` input")
 
     for job, body in jobs.items():
         if job == "changes" or not isinstance(body, dict):

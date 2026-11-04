@@ -1347,7 +1347,7 @@ jobs:
   cran-special:
     uses: pedrobtz/r-actions/.github/workflows/cran-special.yml@v1
     with:
-      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
+      profile: auto
 ```
 
 **Full profile only.** `profile: quick` skips all three. Each is a full
@@ -1522,29 +1522,32 @@ base, not the branch alone. Across three packages that second run was 28 to
 | `cran-special.yml` | skipped | `rcnst`, `rlibro` and `vnu` |
 
 The caller picks the profile, and a caller that passes nothing gets the
-workflow it had before this input existed. (The one thing here that reads the
-event for itself is the documentation-only gate, [below](#documentation-only-changes).)
-The examples pass:
+workflow it had before this input existed. `auto` hands the choice to the
+shared gate, [below](#documentation-only-changes), which reads the event and
+the pull request's labels. The examples pass:
 
 ```yaml
     with:
-      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
+      profile: auto
 ```
 
-Quick on each push to a pull request, full on the push to main. A pull
+Quick on each push to a pull request, full on every other event. A pull
 request that touches something the quick set cannot see — a Windows-only code
 path, a Suggests guard — takes the `full-ci` label and runs in full while the
-label stays on. The examples list `labeled` among the `pull_request` types so
-that adding it starts that run. Any label starts a run, and the concurrency
-group below cancels the one it replaces.
+label stays on. The examples list `labeled` and `unlabeled` among the
+`pull_request` types so that adding or removing a label starts a new run. Any
+label starts one, and the concurrency group below cancels the one it replaces.
+`auto` replaces the expression callers used to write for this,
+`github.event_name == 'pull_request' && !contains(...labels..., 'full-ci') && 'quick' || 'full'`,
+which still works.
 
 The cost, stated rather than hidden: a failure only the full set catches is
 found on main after merge, not on the pull request before it. The usual
 answer to that is a merge queue, which runs the full set on the would-be merge
 commit and merges only if it passes, but merge queues need a repository owned
 by an organization; on a personal account `merge_group` never fires. Where one
-is available, add `merge_group:` to the triggers and the same expression makes
-that run full.
+is available, add `merge_group:` to the triggers and `auto` makes that run
+full.
 
 Anything other than `quick` runs full, so a typo costs minutes rather than
 coverage.
@@ -1593,6 +1596,8 @@ Documentation means, and only means:
 | `*.md` at the top level — README, NEWS, cran-comments | nothing checked here reads it; the checks run with `_R_CHECK_CRAN_INCOMING_=false`, so not even the URL checks do |
 | `*.md` under a dot directory — `.github/`, `.agents/` | a package does not ship its dot directories |
 | `_pkgdown.yml`, `pkgdown/` | read by pkgdown alone |
+| `CRAN-SUBMISSION`, `.gitignore`, `CODEOWNERS`, `.github/ISSUE_TEMPLATE/`, `.github/PULL_REQUEST_TEMPLATE*`, `.github/dependabot.yml`, `.github/FUNDING.yml` | repository housekeeping: nothing builds, installs or checks it. `.gitignore` changes what git tracks, not what `R CMD build` ships — that is `.Rbuildignore`, which is code |
+| `.github/workflows/*` other than the calling workflow's own file | changes another workflow, not this one. The caller's own file is code, so a CI change tests itself; it is found from `github.workflow_ref`, and if that cannot be read every workflow file counts as code |
 
 Everything else runs, including files that look like documentation and are
 not:
@@ -1619,11 +1624,64 @@ full workflow. The gated jobs test `!cancelled()` rather than the implicit
 runner time but cannot drop a check.
 
 The gate is a `changes` job of about ten seconds at the top of each workflow.
-It lists the changed files through the compare API, which needs only
+It always runs, because it also resolves `profile` and reads the labels, and
+it lists the changed files through the compare API, which needs only
 `contents: read` — the pull request's file list would need `pull-requests:
 read`, which a caller need not hold, and a reusable workflow asking for more
 than its caller holds is a `startup_failure`. Its log lists every changed file
 as `docs`, `meta` or `code`, and a skip says so in the job summary.
+
+#### Labels
+
+A label on a pull request can ask for less, or for more:
+
+| Label | Effect on the pull request's runs |
+|---|---|
+| `full-ci` | `profile: auto` resolves to `full`; overrides every label below |
+| `ci:minimal` | treated as a metadata change: r-cmd-check runs its `quick-runners` legs and every other gated job is skipped |
+| `skip-ci:<workflow>` | every job in that workflow is skipped — `skip-ci:fuzz`, `skip-ci:valgrind`, `skip-ci:r-cmd-check`. The name is the reusable workflow's file name without `.yml`, or the `name` a caller gives `changes.yml` |
+
+**Labels change pull request runs only.** The push to the default branch
+after merge carries no labels and is classified by its files, so whatever a
+label skipped still runs there — the same trade `profile: quick` already
+makes. The skip shows in the gate's log and job summary, naming the label.
+Labels apply even with `skip-docs-only: false`, which turns off the file rules
+only: a label is a decision someone made about that pull request.
+
+A label applied at creation (`gh pr create --label skip-ci:fuzz`) is in the
+`opened` event and counts from the first run. One added later starts a new
+run, as long as the caller lists `labeled` and `unlabeled` in its
+`pull_request` types; the concurrency group cancels the run it replaces.
+
+The labels have to exist in the repository before they can be applied:
+
+```sh
+gh label create full-ci     --color B60205 --force --description "Run the full CI set on this pull request"
+gh label create ci:minimal  --color 0E8A16 --force --description "One quick R CMD check on this pull request"
+gh label create skip-ci:fuzz --color FBCA04 --force --description "Skip fuzz.yml on this pull request"
+```
+
+#### The gate for a package's own workflows
+
+A workflow that is not in r-actions — a package's own fuzz job, an ABI probe
+— can make the same decision by calling `changes.yml` and gating its jobs on
+the outputs, instead of a hand-written `paths-ignore` list that follows none
+of the labels and drifts from the rules above:
+
+```yaml
+jobs:
+  changes:
+    uses: pedrobtz/r-actions/.github/workflows/changes.yml@v1
+    with:
+      name: fuzz            # answers to skip-ci:fuzz
+  fuzz:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs-only != 'true' }}
+```
+
+It needs only `contents: read`. Its outputs are `docs-only`, `scope`
+(`docs`, `metadata` or `code`) and `profile` (`quick` or `full`, from its
+`profile` input, which takes `auto`).
 
 It is on by default, so every caller gets it when `v1` moves. To always run:
 
@@ -1647,9 +1705,10 @@ as `.github/workflows/R-CMD-check.yml`, replacing the r-lib/actions template:
 on:
   push:
     branches: [main, master]
-  # `labeled` so that adding `full-ci` to a pull request reruns it in full.
+  # `labeled`/`unlabeled` so that adding or removing a CI label (`full-ci`,
+  # `ci:minimal`, `skip-ci:<workflow>`) reruns it.
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 name: R-CMD-check
 
@@ -1667,7 +1726,7 @@ jobs:
     with:
       # Quick on each push to a pull request, full after merge. The
       # `full-ci` label runs the full set on a pull request before merging.
-      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
+      profile: auto
 ```
 
 Keep the file name your badge already points at — the workflow's own `name:`
@@ -1723,7 +1782,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 name: native-checks
 
@@ -1740,12 +1799,12 @@ jobs:
     uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
     with:
       asan: true
-      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
+      profile: auto
 
   valgrind:
     uses: pedrobtz/r-actions/.github/workflows/valgrind.yml@v1
     with:
-      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
+      profile: auto
 
   lto:
     uses: pedrobtz/r-actions/.github/workflows/lto.yml@v1
@@ -1759,7 +1818,7 @@ jobs:
   cran-special:
     uses: pedrobtz/r-actions/.github/workflows/cran-special.yml@v1
     with:
-      profile: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') && 'quick' || 'full' }}
+      profile: auto
 ```
 
 All six jobs appear under a single workflow run in the GitHub UI and execute
