@@ -21,6 +21,16 @@ older than the newest in their line, leave it where it is.
 See [Releases](https://github.com/pedrobtz/r-actions/releases) for the full
 changelog.
 
+### Artifacts
+
+Every artifact these workflows upload is kept for 7 days, not GitHub's
+default 90. Artifacts count against the account's Actions storage, which is
+0.5 GB on the free plan, and an account with many packages fills it within
+days. Whole check directories (`check-*`, `valgrind-check`, `check-rcnst`,
+`check-rlibro`, `arch-*`) are uploaded only when the job fails. The small
+reports (sanitizer logs, fuzz findings, rchk and analyzer output, vnu) are
+uploaded on every run. `tests/lint-workflows.py` enforces both rules.
+
 ## Workflows
 
 ### `r-cmd-check.yml` — R CMD check, runners and CRAN-like containers
@@ -811,7 +821,7 @@ valgrind finding: valgrind writes to the `.Rout` files, check reads them for R
 errors only, and the job goes green with `definitely lost` in a log nobody
 opens. Valgrind writes into the same `.Rout` files as R, so grepping the output
 is the only way, and it is what R-hub's own container scripts do.
-The whole check directory is uploaded as an artifact.
+When the job fails, the whole check directory is uploaded as an artifact.
 
 ### `lto.yml` — Link-Time Optimization
 

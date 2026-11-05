@@ -725,3 +725,4 @@ jobs:
             findings.detail
             findings.unparsed
           if-no-files-found: ignore
+          retention-days: 7

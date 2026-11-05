@@ -491,10 +491,11 @@ jobs:
             sh -c "${SETUP} && sh /arch/run.sh"
 
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: failure()
         with:
           name: arch-${{ matrix.target.name }}
           path: |
             *.Rcheck/00check.log
             *.Rcheck/00install.out
           if-no-files-found: ignore
+          retention-days: 7
