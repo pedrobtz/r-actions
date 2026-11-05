@@ -58,10 +58,10 @@ on:
           `github.event_name == 'pull_request' && 'quick' || 'full'` gets the
           wide step on each push and the sensitive one once per merge.
 
-          `auto` resolves the profile from the event: `quick` on a pull
-          request, `full` on every other event and on a pull request labelled
-          `full-ci`. It replaces the expression callers used to write for
-          that, and the shared `changes` job is what resolves it.
+          `auto` resolves the profile from the event: `full` on a manual
+          dispatch, on a schedule and on a pull request labelled `full-ci`,
+          `quick` on every other event, a push to main included. The shared
+          `changes` job resolves it.
         type: string
         required: false
         default: full
@@ -220,12 +220,16 @@ jobs:
           fi
           has_label() { grep -qxF -- "$1" <<<"$labels"; }
 
-          # `auto` is quick on a pull request and full everywhere else, and
-          # the `full-ci` label makes a pull request full. Any other value
-          # keeps its old meaning: `quick` is quick, anything else is full.
+          # `auto` is quick by default. A manual dispatch, a schedule and the
+          # `full-ci` label on a pull request make it full; a push to main
+          # stays quick. Any other value keeps its old meaning: `quick` is
+          # quick, anything else is full.
           case "${R_ACTIONS_PROFILE:-full}" in
             auto)
-              if [ "$is_pr" = true ] && ! has_label full-ci; then profile=quick; fi ;;
+              case "$EVENT" in
+                workflow_dispatch|schedule) ;;
+                *) has_label full-ci || profile=quick ;;
+              esac ;;
             quick) profile=quick ;;
           esac
           echo "profile: $profile"

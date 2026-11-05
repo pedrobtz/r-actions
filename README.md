@@ -602,7 +602,7 @@ jobs:
       asan-run: Rscript tools/sanitizer-exercise.R
 ```
 
-`profile: quick` skips this job and keeps UBSan; see [Quick on pull requests, full after merge](#quick-on-pull-requests-full-after-merge).
+`profile: quick` skips this job and keeps UBSan; see [Quick by default, full on demand](#quick-by-default-full-on-demand).
 
 `asan-run` replaces `R CMD check` with a command of your own. The default path
 is fine for most packages — measured at about two minutes on a package with
@@ -806,7 +806,7 @@ already does that job, more precisely.
 Runs `R CMD check --use-valgrind` under R-release, then **scans the check
 output and fails on a finding**. Catches heap errors and memory leaks, and is
 the check CRAN runs on their valgrind machine. Slower than the sanitizers job,
-and skipped under `profile: quick`; see [Quick on pull requests, full after merge](#quick-on-pull-requests-full-after-merge).
+and skipped under `profile: quick`; see [Quick by default, full on demand](#quick-by-default-full-on-demand).
 
 ```yaml
 jobs:
@@ -882,9 +882,9 @@ unprotected `SEXP` is caught when a collection lands while it is live, so a
 larger step widens the window it can hide in. Prefer 100 over not running this
 job at all.
 
-Or keep 20 and pay for it once per merge rather than on every push.
-`profile: quick` runs at `quick-step` (500 by default) instead of `step`, so a
-pull request gets the wide step and main the sensitive one; see [Quick on pull requests, full after merge](#quick-on-pull-requests-full-after-merge).
+Or keep 20 and pay for it only on a schedule or a dispatch, not on every push.
+`profile: quick` runs at `quick-step` (500 by default) instead of `step`, so
+pull requests and main get the wide step and the full runs the sensitive one; see [Quick by default, full on demand](#quick-by-default-full-on-demand).
 
 Most of that cost is not your package. `expect_*()` allocates heavily —
 comparison, condition objects, srcrefs — so on the measurement above, 40 raw
@@ -1511,7 +1511,7 @@ Two settings on the caller's side:
 | `file` | `CRAN-SUBMISSION` | path of the submission record |
 | `bump` | `true` | open the `<version>.9000` pull request |
 
-### Quick on pull requests, full after merge
+### Quick by default, full on demand
 
 Run everything on every push to a pull request and one job decides how long
 you wait: gctorture at step 20. On one package it took 36 minutes of a
@@ -1541,18 +1541,23 @@ the pull request's labels. The examples pass:
       profile: auto
 ```
 
-Quick on each push to a pull request, full on every other event. A pull
+Quick by default: on each push to a pull request and on each push to main.
+The full set runs on a manual dispatch (`gh workflow run <caller> --ref main`)
+and on a schedule, and the examples schedule it weekly. A merge therefore costs
+a quick run, and the full set runs where someone asks for it: before a release,
+or once at the end of a series of merges. A pull
 request that touches something the quick set cannot see — a Windows-only code
 path, a Suggests guard — takes the `full-ci` label and runs in full while the
 label stays on. The examples list `labeled` and `unlabeled` among the
 `pull_request` types so that adding or removing a label starts a new run. Any
 label starts one, and the concurrency group below cancels the one it replaces.
-`auto` replaces the expression callers used to write for this,
+Callers that want the old behaviour, full on every push to main, can write
 `github.event_name == 'pull_request' && !contains(...labels..., 'full-ci') && 'quick' || 'full'`,
 which still works.
 
 The cost, stated rather than hidden: a failure only the full set catches is
-found on main after merge, not on the pull request before it. The usual
+found at the next full run, the weekly one or a dispatched one, not on the
+pull request or the merge that brought it. The usual
 answer to that is a merge queue, which runs the full set on the would-be merge
 commit and merges only if it passes, but merge queues need a repository owned
 by an organization; on a personal account `merge_group` never fires. Where one
@@ -1719,6 +1724,11 @@ on:
   # `ci:minimal`, `skip-ci:<workflow>`) reruns it.
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  # The full set runs weekly and on demand:
+  # `gh workflow run R-CMD-check.yml --ref main`.
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
 
 name: R-CMD-check
 
@@ -1734,8 +1744,9 @@ jobs:
   R-CMD-check:
     uses: pedrobtz/r-actions/.github/workflows/r-cmd-check.yml@v1
     with:
-      # Quick on each push to a pull request, full after merge. The
-      # `full-ci` label runs the full set on a pull request before merging.
+      # Quick on pull requests and on pushes to main. Full on the weekly
+      # schedule, on a manual dispatch, and on a pull request labelled
+      # `full-ci`.
       profile: auto
 ```
 
@@ -1793,6 +1804,11 @@ on:
     branches: [main, master]
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  # The full set runs weekly and on demand:
+  # `gh workflow run native-checks.yml --ref main`.
+  schedule:
+    - cron: "47 4 * * 1"
+  workflow_dispatch:
 
 name: native-checks
 

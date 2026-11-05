@@ -42,7 +42,10 @@ case_() {
 R=R/x.R C=src/a.c
 case_ "pull request, auto: quick"           "docs-only=false scope=code profile=quick" pull_request '[]' fuzz auto "$R"
 case_ "pull request, auto, full-ci: full"   "docs-only=false scope=code profile=full"  pull_request '["full-ci"]' fuzz auto "$R"
-case_ "push, auto: full"                    "docs-only=false scope=code profile=full"  push null fuzz auto "$R"
+case_ "push, auto: quick"                   "docs-only=false scope=code profile=quick" push null fuzz auto "$R"
+case_ "dispatch, auto: full"                "docs-only=false scope=code profile=full"  workflow_dispatch null fuzz auto "$R"
+case_ "schedule, auto: full"                "docs-only=false scope=code profile=full"  schedule null fuzz auto "$R"
+case_ "release, auto: quick"                "docs-only=false scope=code profile=quick" release null fuzz auto "$R"
 case_ "push, explicit quick stays quick"    "docs-only=false scope=code profile=quick" push null fuzz quick "$R"
 case_ "no profile input: full"              "docs-only=false scope=code profile=full"  pull_request '[]' fuzz "" "$R"
 case_ "skip-ci:fuzz skips fuzz"             "docs-only=true scope=docs profile=full"   pull_request '["skip-ci:fuzz"]' fuzz "" "$C"
