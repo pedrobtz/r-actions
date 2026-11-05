@@ -392,8 +392,9 @@ jobs:
           echo "valgrind reported no errors or leaks."
 
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: failure()
         with:
           name: valgrind-check
           path: check
           if-no-files-found: ignore
+          retention-days: 7

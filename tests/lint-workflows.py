@@ -45,6 +45,9 @@ METADATA_GATED = {("r-cmd-check.yml", "runners")}
 METADATA_GATE = ("${{ !cancelled() && (needs.changes.outputs.docs-only != 'true' "
                  "|| needs.changes.outputs.scope == 'metadata')")
 
+# The longest an artifact may be kept, in days.
+RETENTION_DAYS = 7
+
 failures = []
 changes_jobs = {}
 
@@ -177,6 +180,26 @@ for path in sorted(WORKFLOWS.glob("*.yml")):
         elif name not in UNGATED:
             fail(name, "is in neither GATED nor UNGATED; decide whether a "
                        "documentation-only change should skip it")
+
+    # Artifacts count against the account's Actions storage, 0.5 GB on the
+    # free plan, and default to 90 days. A check directory uploaded on every
+    # green run filled it across the portfolio in November 2026. Every upload
+    # sets a short retention, and a whole check directory goes up on failure
+    # only, when someone will read it.
+    for job, body in doc["jobs"].items():
+        for step in (body or {}).get("steps") or [] if isinstance(body, dict) else []:
+            if not str(step.get("uses", "")).startswith("actions/upload-artifact@"):
+                continue
+            with_ = step.get("with") or {}
+            days = with_.get("retention-days")
+            if not isinstance(days, int) or days > RETENTION_DAYS:
+                fail(name, f"job `{job}` uploads `{with_.get('name')}` without "
+                           f"`retention-days` of at most {RETENTION_DAYS}")
+            paths = str(with_.get("path", ""))
+            whole = paths.strip() == "check" or ".Rcheck" in paths
+            if whole and "always()" in str(step.get("if", "")):
+                fail(name, f"job `{job}` uploads a whole check directory, "
+                           f"`{with_.get('name')}`, on `always()`; use `failure()`")
 
     perms = permissions_of(doc)
 

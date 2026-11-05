@@ -811,6 +811,7 @@ jobs:
           name: ubsan-${{ matrix.compiler }}
           path: ${{ runner.temp }}/ubsan-reports
           if-no-files-found: ignore
+          retention-days: 7
 
   # AddressSanitizer, in the R-hub containers -- which is the one place it
   # works for an R package, and the reason the job above does not attempt it.
@@ -1144,3 +1145,4 @@ jobs:
           name: asan-${{ matrix.container }}
           path: sanitizer.log
           if-no-files-found: ignore
+          retention-days: 7

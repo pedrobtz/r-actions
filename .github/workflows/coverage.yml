@@ -614,3 +614,4 @@ jobs:
             src/gcov.log
             src/*.gcov
           if-no-files-found: ignore
+          retention-days: 7

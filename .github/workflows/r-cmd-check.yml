@@ -933,11 +933,12 @@ jobs:
           echo "No warnings outside the allow-list."
 
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: failure()
         with:
           name: check-${{ matrix.container }}
           path: check
           if-no-files-found: ignore
+          retention-days: 7
 
   # CRAN's NOSUGGESTS flavor: does the package degrade when its suggested
   # packages are absent, or does it error?
@@ -1126,11 +1127,12 @@ jobs:
           echo "No warnings outside the allow-list."
 
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: failure()
         with:
           name: check-nosuggests
           path: check
           if-no-files-found: ignore
+          retention-days: 7
 
   # CRAN's NOLD flavor: R built --disable-long-double.
   #
@@ -1298,8 +1300,9 @@ jobs:
           echo "No warnings outside the allow-list."
 
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: failure()
         with:
           name: check-nold
           path: check
           if-no-files-found: ignore
+          retention-days: 7

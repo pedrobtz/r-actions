@@ -400,11 +400,12 @@ jobs:
           echo "No constants finding."
 
       - uses: actions/upload-artifact@v7
-        if: always() && steps.src.outputs.has-src == 'true'
+        if: failure() && steps.src.outputs.has-src == 'true'
         with:
           name: check-rcnst
           path: check
           if-no-files-found: ignore
+          retention-days: 7
 
   # A package that writes into the directory it was installed to. It works on
   # a laptop, where the library is the user's own, and fails wherever the
@@ -537,13 +538,14 @@ jobs:
           done
 
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: failure()
         with:
           name: check-rlibro
           path: |
             *.Rcheck
             00install.out
           if-no-files-found: ignore
+          retention-days: 7
 
   # HTML validity of the reference manual, with the same validator and the
   # same recipe as CRAN's vnu check: render the package's Rd to one HTML
@@ -650,3 +652,4 @@ jobs:
             refman.html
             vnu-report.txt
           if-no-files-found: ignore
+          retention-days: 7
