@@ -3,6 +3,11 @@ on:
     branches: [main, master]
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  # The full set runs weekly and on demand:
+  # `gh workflow run native-checks.yml --ref main`.
+  schedule:
+    - cron: "47 4 * * 1"
+  workflow_dispatch:
 
 name: native-checks
 

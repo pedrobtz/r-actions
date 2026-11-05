@@ -131,12 +131,16 @@ jobs:
           fi
           has_label() { grep -qxF -- "$1" <<<"$labels"; }
 
-          # `auto` is quick on a pull request and full everywhere else, and
-          # the `full-ci` label makes a pull request full. Any other value
-          # keeps its old meaning: `quick` is quick, anything else is full.
+          # `auto` is quick by default. A manual dispatch, a schedule and the
+          # `full-ci` label on a pull request make it full; a push to main
+          # stays quick. Any other value keeps its old meaning: `quick` is
+          # quick, anything else is full.
           case "${R_ACTIONS_PROFILE:-full}" in
             auto)
-              if [ "$is_pr" = true ] && ! has_label full-ci; then profile=quick; fi ;;
+              case "$EVENT" in
+                workflow_dispatch|schedule) ;;
+                *) has_label full-ci || profile=quick ;;
+              esac ;;
             quick) profile=quick ;;
           esac
           echo "profile: $profile"
