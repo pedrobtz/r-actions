@@ -191,6 +191,28 @@ on:
         type: number
         required: false
         default: 75
+    # What a finding was, for a caller that reports it: examples/fuzz.yml
+    # hands these to report.yml, which keeps one issue per distinct finding.
+    # All three are empty when the fuzzer found nothing, and when the job
+    # failed for another reason (a build error, the time budget).
+    outputs:
+      finding:
+        description: >
+          One line naming the finding: the sanitizer's SUMMARY, with the
+          runtime error for a UBSan report, paths relative to the repository.
+        value: ${{ jobs.fuzz.outputs.finding }}
+      finding-key:
+        description: >
+          The finding with line numbers and counts taken out, and the harness
+          put in, so that the same bug found again after an unrelated edit
+          moved its line still matches the issue already open for it.
+        value: ${{ jobs.fuzz.outputs.finding-key }}
+      report:
+        description: >
+          Markdown describing the finding: the sanitizer's report, the
+          command that rebuilds the target, and the crashing input itself
+          when it is small, since the artifact holding it expires.
+        value: ${{ jobs.fuzz.outputs.report }}
 
 name: fuzz
 
@@ -413,6 +435,10 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.docs-only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      finding: ${{ steps.describe.outputs.finding }}
+      finding-key: ${{ steps.describe.outputs.finding-key }}
+      report: ${{ steps.describe.outputs.report }}
 
     # Job-wide, so the merge replays the corpus under the same rules the
     # fuzzing found it under.
@@ -661,6 +687,98 @@ jobs:
             exit 1
           fi
           echo "no crashes in ${MAX_TIME}s."
+
+      # A red scheduled run names nothing by itself, and the crashing input
+      # in its artifact is gone in seven days. This turns fuzz.log into a
+      # one-line finding, a key that survives line numbers moving, and a
+      # report that carries the input, for report.yml to file. It reads only
+      # fuzz.log and the files beside it, so tests/check-fuzz-finding.sh runs
+      # it on recorded logs.
+      - name: Describe the finding
+        id: describe
+        if: failure() && steps.run.outputs.status != '' && steps.run.outputs.status != '0'
+        env:
+          HARNESS: ${{ inputs.harness }}
+          CFLAGS_IN: ${{ inputs.cflags }}
+          SANITIZERS: ${{ inputs.sanitizers }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          STATUS: ${{ steps.run.outputs.status }}
+        run: |
+          set -euo pipefail
+          ws=${GITHUB_WORKSPACE:-$PWD}
+          # Absolute paths into the checkout read as repository paths.
+          rel() { sed -e "s#${ws}/##g" -e 's/\r$//'; }
+
+          summary=$(grep -m1 '^SUMMARY: ' fuzz.log | sed 's/^SUMMARY: //' | rel || true)
+          # UBSan's SUMMARY names a place but not what went wrong there.
+          ub=$(grep -m1 'runtime error: ' fuzz.log | sed 's/.*runtime error: //' | rel || true)
+          if [ -z "$summary" ]; then
+            summary=$(grep -m1 -E '==[0-9]+== ?ERROR: ' fuzz.log | sed -E 's/.*==[0-9]+== ?ERROR: //' | rel || true)
+          fi
+          [ -n "$summary" ] || summary="the fuzz target exited ${STATUS}"
+          finding=$summary
+          case "$summary" in
+            UndefinedBehaviorSanitizer:*) [ -z "$ub" ] || finding="${summary% } (${ub})" ;;
+          esac
+          finding=$(printf '%s' "$finding" | tr -s ' ' | cut -c1-200)
+
+          # Line and column numbers move with any edit above the bug, and
+          # leak sizes and memory figures change from run to run; neither
+          # makes it a different bug. Paths stay, without their directories.
+          key=$(printf '%s %s' "$HARNESS" "$finding" \
+                | sed -E 's#[^ ():]*/##g; s/:[0-9]+(:[0-9]+)?//g; s/[0-9]+/N/g')
+
+          input=$(ls -1 crash-* leak-* timeout-* oom-* 2>/dev/null | head -n 1 || true)
+          excerpt=$(awk '/==[0-9]+== ?ERROR|runtime error:|^ERROR: libFuzzer/ {on=1}
+                         on && /^Shadow bytes around|^SUMMARY: |^MS: / {exit}
+                         on {print; if (++n == 40) exit}' fuzz.log | rel | sed 's/```/` ` `/g')
+
+          {
+            echo "**${finding}**"
+            echo
+            echo "Found by \`${HARNESS}\` on ${SHA:0:7}: ${RUN_URL}"
+            if [ -n "$input" ]; then
+              echo "The input is \`${input}\` in that run's \`fuzz-findings\` artifact, which is kept for 7 days."
+            fi
+            if [ -n "$excerpt" ]; then
+              echo
+              echo '```text'
+              printf '%s\n' "$excerpt"
+              echo '```'
+            fi
+            echo
+            echo "Rebuild the target and replay the input:"
+            echo
+            echo '```sh'
+            # shellcheck disable=SC2046
+            echo "clang ${CFLAGS_IN} -fsanitize=${SANITIZERS} ${HARNESS} $(tr '\n' ' ' 2>/dev/null < sources.txt)-o fuzz-target"
+            echo "ASAN_OPTIONS=${ASAN_OPTIONS:-} UBSAN_OPTIONS=${UBSAN_OPTIONS:-} ./fuzz-target ${input:-<input>}"
+            echo '```'
+            # Most crashing inputs are a few bytes, and an issue outlives the
+            # artifact by months.
+            if [ -n "$input" ] && [ "$(wc -c < "$input")" -le 4096 ]; then
+              echo
+              echo "<details><summary>The input, base64 (\`base64 -d > ${input}\`)</summary>"
+              echo
+              echo '```text'
+              base64 < "$input"
+              echo '```'
+              echo
+              echo "</details>"
+            fi
+          } > finding.md
+
+          eof="EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "finding=${finding}"
+            echo "finding-key=${key}"
+            echo "report<<${eof}"
+            cat finding.md
+            echo "${eof}"
+          } >> "$GITHUB_OUTPUT"
+          cat finding.md >> "$GITHUB_STEP_SUMMARY"
+          echo "finding: ${finding}"
 
       # Merged down to the inputs that still add coverage before it is
       # saved. Without this every run's new inputs were kept forever, and the

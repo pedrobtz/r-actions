@@ -53,6 +53,20 @@ jobs:
           /tmp/gate/bin/pip install --quiet pyyaml
           PATH="/tmp/gate/bin:$PATH" bash tests/check-gate.sh
 
+  report:
+    name: fuzz findings are described and reported once each
+    # A key that moves with line numbers files a duplicate issue every
+    # night, and closing a finding on a green run hides a bug the fuzzer did
+    # not happen to reach again. Neither fails anything visibly.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the describe step and report.yml through their cases
+        run: |
+          python3 -m venv /tmp/report
+          /tmp/report/bin/pip install --quiet pyyaml
+          PATH="/tmp/report/bin:$PATH" bash tests/check-report.sh
+
   alloc-interposer:
     name: alloc-failure interposer is transparent
     # The one piece of C this repository ships. It sits in a heredoc inside

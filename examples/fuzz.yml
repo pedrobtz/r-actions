@@ -12,6 +12,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   fuzz:
     uses: pedrobtz/r-actions/.github/workflows/fuzz.yml@v1
@@ -24,3 +27,22 @@ jobs:
       seed-corpus: tests/yaml-test-suite
       dictionary: tools/fuzz/yaml.dict
       max-total-time: ${{ github.event_name == 'schedule' && 1800 || 120 }}
+
+  # A red scheduled run otherwise notifies only whoever last edited the cron
+  # line. This files one issue per distinct finding, labelled fuzz, with the
+  # sanitizer's report and the crashing input; it comments when the same
+  # finding comes back, and reopens it if it was closed as fixed. A finding's
+  # issue is closed by its fix, never by a green run.
+  report:
+    needs: fuzz
+    # always(), so a failed run is reported; skipped means a docs-only change.
+    if: ${{ always() && github.event_name == 'schedule' && needs.fuzz.result != 'skipped' }}
+    permissions:
+      issues: write
+    uses: pedrobtz/r-actions/.github/workflows/report.yml@v1
+    with:
+      name: fuzz
+      result: ${{ needs.fuzz.result }}
+      finding: ${{ needs.fuzz.outputs.finding }}
+      key: ${{ needs.fuzz.outputs.finding-key }}
+      details: ${{ needs.fuzz.outputs.report }}
