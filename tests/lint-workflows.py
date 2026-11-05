@@ -18,6 +18,7 @@ WRITERS = {
     "coverage.yml": {"contents": "write"},
     "cran-release.yml": {"contents": "write", "pull-requests": "write"},
     "release.yml": {"contents": "write"},
+    "report.yml": {"issues": "write"},
     "vendor-upstream.yml": {"contents": "read", "issues": "write"},
 }
 
@@ -32,6 +33,7 @@ GATED = {
 UNGATED = {
     "cran-release.yml": "it runs on a push that changes CRAN-SUBMISSION, never on a diff of code",
     "coverage.yml": "its job summary and badge are wanted on every change",
+    "report.yml": "it runs after another job, on that job's result, not on a diff",
     "revdep.yml": "callers trigger it on the paths consumers see, and on a schedule",
     "vendor.yml": "it matches its own paths and takes seconds",
     "vendor-upstream.yml": "it runs on a schedule, where there is no diff",

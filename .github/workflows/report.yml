@@ -1,0 +1,182 @@
+# Files what a scheduled run found as an issue, so that it is read.
+#
+# A scheduled run that fails notifies only whoever last edited its cron line,
+# and a check that is red every night is soon a check nobody looks at: in
+# November 2026 five packages' nightly fuzzers sat red for a week on real
+# heap-use-after-free and UB findings. This keeps one issue per distinct
+# finding instead.
+#
+# It is a workflow of its own, called as a second job after the one it
+# reports on, because it writes issues. A reusable workflow cannot be granted
+# more than its caller holds, so asking for `issues: write` inside fuzz.yml
+# would have been a startup_failure for every caller that did not grant it.
+# Here only the callers that opt in grant it, on the one job that needs it.
+#
+#   report:
+#     needs: fuzz
+#     if: ${{ always() && github.event_name == 'schedule' }}
+#     permissions:
+#       issues: write
+#     uses: pedrobtz/r-actions/.github/workflows/report.yml@v1
+#     with:
+#       name: fuzz
+#       result: ${{ needs.fuzz.result }}
+#       finding: ${{ needs.fuzz.outputs.finding }}
+#       key: ${{ needs.fuzz.outputs.finding-key }}
+#       details: ${{ needs.fuzz.outputs.report }}
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: >
+          What is reported, such as `fuzz` or `gctorture`. It names the issue
+          and is its label, unless `label` says otherwise.
+        type: string
+        required: true
+      result:
+        description: >
+          The reported job's result: `needs.<job>.result`. `success` closes
+          the run's own issue, `skipped` does nothing, and anything else --
+          `failure`, or `cancelled` for a job that reached its timeout -- is
+          reported.
+        type: string
+        required: true
+      finding:
+        description: >
+          One line naming what was found, used as the issue title. With it,
+          each distinct finding gets an issue of its own. Without it, the run
+          has one issue, opened when it fails and closed when it is green.
+        type: string
+        required: false
+        default: ""
+      key:
+        description: >
+          What makes two findings the same, when that is not the finding's
+          text: fuzz.yml's `finding-key` drops line numbers, so an edit above
+          the bug does not open a second issue for it. Defaults to `finding`.
+        type: string
+        required: false
+        default: ""
+      details:
+        description: >
+          Markdown for the body of a new issue, under the line naming the
+          run. Later runs comment rather than rewrite it.
+        type: string
+        required: false
+        default: ""
+      label:
+        description: The issue label. Defaults to `name`.
+        type: string
+        required: false
+        default: ""
+
+name: report
+
+permissions:
+  issues: write
+
+jobs:
+  report:
+    if: ${{ inputs.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Open, update, reopen or close the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NAME: ${{ inputs.name }}
+          RESULT: ${{ inputs.result }}
+          FINDING: ${{ inputs.finding }}
+          KEY: ${{ inputs.key }}
+          DETAILS: ${{ inputs.details }}
+          LABEL: ${{ inputs.label }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        # Everything the caller passes arrives through the environment and is
+        # never interpolated into this script: a finding is text a fuzzer
+        # chose.
+        run: |
+          set -euo pipefail
+          label=${LABEL:-$NAME}
+          key=${KEY:-$FINDING}
+
+          # Found by marker, not by title or by label alone: a finding's
+          # title is truncated, and one repository can carry several
+          # findings, and the run's own failure, under the same label.
+          if [ -n "$key" ]; then
+            id=$(printf '%s' "$key" | sha1sum | cut -c1-12)
+            marker="<!-- r-actions:report:${NAME}:${id} -->"
+          else
+            marker="<!-- r-actions:report:${NAME}:run -->"
+          fi
+
+          find_issue() {   # $1: open or closed; prints "number reason"
+            gh issue list --repo "$REPO" --label "$label" --state "$1" --limit 200 \
+              --json number,body,stateReason \
+              --jq "map(select(.body | contains(\"${marker}\"))) | .[0] // empty | \"\(.number) \(.stateReason)\""
+          }
+
+          gh label create "$label" --repo "$REPO" --color B60205 \
+            --description "Filed by a scheduled ${NAME} run" --force >/dev/null
+
+          open=$(find_issue open); open=${open%% *}
+
+          if [ "$RESULT" = success ]; then
+            # A green run proves a deterministic check is fixed. It proves
+            # nothing about a fuzzer's finding, which a later run may simply
+            # not reach again, so a finding's issue is closed by its fix.
+            if [ -z "$key" ] && [ -n "$open" ]; then
+              gh issue close "$open" --repo "$REPO" --comment "Green again on ${SHA:0:7}: ${RUN}"
+              echo "closed #${open}"
+            fi
+            exit 0
+          fi
+
+          again="Again on ${SHA:0:7}: ${RUN}"
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --repo "$REPO" --body "$again"
+            echo "commented on #${open}"
+            exit 0
+          fi
+
+          closed=$(find_issue closed)
+          if [ -n "$closed" ]; then
+            number=${closed%% *} reason=${closed#* }
+            # Closed as not planned is a decision about this finding; a
+            # nightly run should not argue with it.
+            if [ "$reason" = NOT_PLANNED ]; then
+              echo "#${number} was closed as not planned; leaving it closed"
+              exit 0
+            fi
+            gh issue reopen "$number" --repo "$REPO" \
+              --comment "Found again after it was closed. ${again}"
+            echo "reopened #${number}"
+            exit 0
+          fi
+
+          if [ -n "$FINDING" ]; then
+            title="${NAME}: ${FINDING}"
+          else
+            title="Scheduled ${NAME} fails"
+          fi
+          title=$(printf '%s' "$title" | cut -c1-120)
+          # The marker goes first, so that trimming to GitHub's limit below
+          # can never cut it off.
+          {
+            echo "$marker"
+            echo "Scheduled \`${NAME}\` ended \`${RESULT}\` on ${SHA:0:7}: ${RUN}"
+            if [ -n "$DETAILS" ]; then
+              echo
+              printf '%s\n' "$DETAILS"
+            fi
+            echo
+            if [ -n "$key" ]; then
+              echo "Filed by a scheduled run, which comments here each time it finds this again. Close it with the fix: a green run is no proof a fuzzer's finding is gone, so nothing closes it automatically. Closed as not planned, it stays closed."
+            else
+              echo "Filed by a scheduled run, which comments here at each further failure and closes this on the next green run."
+            fi
+          } > body.md
+          # An issue body holds 65536 characters.
+          head -c 60000 body.md > body.trim.md
+          gh issue create --repo "$REPO" --label "$label" --title "$title" --body-file body.trim.md

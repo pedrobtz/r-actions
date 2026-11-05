@@ -1164,6 +1164,44 @@ so ASan fills every byte of a new allocation rather than the first 4KiB, and
 catches pointers into frames that have returned. Replay a finding locally with
 the same two variables, or it may not reproduce.
 
+#### Findings from a scheduled run become issues
+
+A scheduled run that fails notifies only whoever last edited its cron line,
+and a fuzzer that is red every night is soon one nobody reads. The workflow
+exposes what it found as outputs (`finding`, a one-line name; `finding-key`,
+the same with line numbers and counts taken out; and `report`, Markdown with
+the sanitizer's report, the build and replay commands, and the crashing input
+in base64 when it is 4 KiB or less, since the artifact expires in 7 days).
+[`report.yml`](.github/workflows/report.yml) files them, as a second job the
+caller grants `issues: write`:
+
+```yaml
+  report:
+    needs: fuzz
+    if: ${{ always() && github.event_name == 'schedule' && needs.fuzz.result != 'skipped' }}
+    permissions:
+      issues: write
+    uses: pedrobtz/r-actions/.github/workflows/report.yml@v1
+    with:
+      name: fuzz
+      result: ${{ needs.fuzz.result }}
+      finding: ${{ needs.fuzz.outputs.finding }}
+      key: ${{ needs.fuzz.outputs.finding-key }}
+      details: ${{ needs.fuzz.outputs.report }}
+```
+
+Each distinct finding gets one issue, labelled `fuzz`. The same finding found
+again gets a comment, even after an edit moved its line. A finding's issue
+that was closed is reopened if it comes back, unless it was closed as not
+planned. A green run closes nothing, because it does not prove the fuzzer
+would not find the bug again. A run that fails without a finding (a build
+error, say) gets one issue of its own, which the next green run closes.
+
+The reporting is a separate workflow because it writes issues: asking for
+`issues: write` inside `fuzz.yml` would fail at startup for every caller that
+does not grant it. `report.yml` works the same way for any scheduled check,
+with `finding` left empty.
+
 `embed-r: true` builds the target against an embedded R, for a harness whose
 code under test calls R's API (serialization hooks, SEXP glue): R is installed,
 the target is compiled with `R CMD config --cppflags` and linked to libR alone, and
