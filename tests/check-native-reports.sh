@@ -50,21 +50,24 @@ if [ "$part" = all ] || [ "$part" = reach ]; then
 fi
 
 if [ "$part" = all ] || [ "$part" = mutation ]; then
-  d="$work/mut"; mkdir -p "$d/src"
+  d="$work/mut"; mkdir -p "$d/src" "$d/tmp"
   cp "$fx/lib.c" "$d/src/"; cp "$fx/test.c" "$d/"
   envf="$d/env"; : > "$envf"
-  ( cd "$d" && GITHUB_ENV="$envf" RUNNER_TEMP="$d" LLVM=18 MULL=0.35.0 bash "$work/mut-install.sh" )
+  ( cd "$d" && GITHUB_ENV="$envf" RUNNER_TEMP="$d/tmp" LLVM=18 MULL=0.35.0 bash "$work/mut-install.sh" )
   while IFS= read -r kv; do [ -n "$kv" ] && export "${kv%%=*}=${kv#*=}"; done < "$envf"
-  ( cd "$d" && GITHUB_ENV="$envf" RUNNER_TEMP="$d" INCLUDE="" EXCLUDE=".*/test\.c" TIMEOUT=10000 \
+  ( cd "$d" && GITHUB_ENV="$envf" RUNNER_TEMP="$d/tmp" INCLUDE="" EXCLUDE=".*/test\.c" TIMEOUT=10000 \
       MUTATORS=$'cxx_gt_to_ge\ncxx_gt_to_le' \
-      BUILD='$MULL_CC -c src/lib.c -o lib.o && $MULL_CC -c test.c -o test.o && $MULL_CC lib.o test.o -o mtest' bash -x "$work/mut-configure.sh" ) \
+      BUILD='$MULL_CC -c src/lib.c -o lib.o && $MULL_CC -c test.c -o test.o && $MULL_CC lib.o test.o -o mtest' bash "$work/mut-configure.sh" ) \
     || { echo "FAIL mutation: the build failed"; exit 1; }
   while IFS= read -r kv; do [ -n "$kv" ] && export "${kv%%=*}=${kv#*=}"; done < "$envf"
-  ( cd "$d" && RUNNER_TEMP="$d" TESTS=mtest bash -x "$work/mut-run.sh" > "$d/run.log" 2>&1 ) \
+  ( cd "$d" && RUNNER_TEMP="$d/tmp" TESTS=mtest bash "$work/mut-run.sh" > "$d/run.log" 2>&1 ) \
     || { echo "FAIL mutation: the run step failed"; cat "$d/run.log"; exit 1; }
   ( cd "$d" && GITHUB_WORKSPACE="$d" GITHUB_STEP_SUMMARY="$d/summary.md" bash "$work/mut-report.sh" > /dev/null )
-  want "$d/survivors.txt" '^src/lib.c:4:' "mutation: a mutant of the untested \`> 100\` branch survives"
-  want "$d/killed.txt" '^src/lib.c:6:' "mutation: a mutant of the tested \`> 0\` comparison is killed"
+  want "$d/survivors.txt" '^src/lib.c:5:.*Replaced > with >=' "mutation: \`> 100\` -> \`>= 100\`, untested, survives"
+  want "$d/killed.txt" '^src/lib.c:7:.*Replaced > with >=' "mutation: \`> 0\` -> \`>= 0\`, tested at 0, is killed"
+  if grep -q '^src/lib.c:7:' "$d/survivors.txt"; then
+    echo "FAIL mutation: a mutant of the tested line 7 survived"; failed=1
+  else echo "ok   mutation: nothing on the tested line survives"; fi
   want "$d/summary.md" '| `src/lib.c` |' "mutation: the summary has the per-file row"
 fi
 exit $failed
