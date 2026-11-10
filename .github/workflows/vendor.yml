@@ -48,6 +48,18 @@ on:
           the fetch-and-record tooling: a hand edit that skips the manifest
           leaves a tree nobody can reproduce, and a manifest update that
           skips the checksums leaves one nobody can verify.
+
+          A line may name alternatives separated by `|`, any one of which
+          satisfies it, and an alternative ending in `/` is satisfied by any
+          changed file under that directory. This is for a package whose
+          local patches live beside the manifest: editing an existing patch
+          and re-running fetch changes the vendored tree without changing
+          the manifest, since the manifest names patches but not their
+          contents.
+
+              must-update: |
+                tools/vendor/manifest.tsv | tools/patches/
+                tools/vendor/checksums.sha256
         type: string
         required: false
         default: |
@@ -183,7 +195,22 @@ jobs:
           missing=0
           while IFS= read -r want; do
             [ -n "$want" ] || continue
-            if ! grep -qxF -- "$want" /tmp/vendor-changed; then
+            # Alternatives: `a | b/` is met by a change to file a or to
+            # anything under directory b/. Matched literally (grep -F, awk
+            # index), never as a regex or glob, so a `.` in a path is a dot.
+            printf '%s\n' "$want" | tr '|' '\n' > /tmp/vendor-alts
+            met=""
+            while IFS= read -r alt; do
+              alt=$(printf '%s' "$alt" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+              [ -n "$alt" ] || continue
+              case "$alt" in
+                */) awk -v p="$alt" 'index($0, p) == 1 { f = 1 } END { exit !f }' \
+                      /tmp/vendor-changed && met=1 ;;
+                *)  grep -qxF -- "$alt" /tmp/vendor-changed && met=1 ;;
+              esac
+              [ -z "$met" ] || break
+            done < /tmp/vendor-alts
+            if [ -z "$met" ]; then
               echo
               echo "FAIL vendored sources changed without updating $want."
               missing=1

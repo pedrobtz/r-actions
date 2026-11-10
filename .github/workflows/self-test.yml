@@ -67,6 +67,20 @@ jobs:
           /tmp/report/bin/pip install --quiet pyyaml
           PATH="/tmp/report/bin:$PATH" bash tests/check-report.sh
 
+  vendor:
+    name: vendor guard asks for the manifest exactly when it should
+    # Wrong in one direction, a legitimate patch edit goes red and people
+    # learn to ignore the job; in the other, a hand edit to vendored code
+    # goes green. Neither looks like a broken check.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the PR step through its cases
+        run: |
+          python3 -m venv /tmp/vendor
+          /tmp/vendor/bin/pip install --quiet pyyaml
+          PATH="/tmp/vendor/bin:$PATH" bash tests/check-vendor.sh
+
   alloc-interposer:
     name: alloc-failure interposer is transparent
     # The one piece of C this repository ships. It sits in a heredoc inside
