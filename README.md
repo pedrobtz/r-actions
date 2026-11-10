@@ -1550,11 +1550,13 @@ jobs:
   mutation:
     uses: pedrobtz/r-actions/.github/workflows/mutation.yml@v1
     with:
-      build: make -C ctest zuh_ctest CC="$MULL_CC"
+      build: make -C ctest zuh_ctest CC="$MULL_CC"   # one -c per file
       tests: ctest/zuh_ctest
 ```
 
-A test kills a mutant by exiting non-zero. `include` and `exclude` are
+Compile each source file in a command of its own (`-c`) and link separately,
+as make does: Mull re-parses every file from its recorded command line. A
+test kills a mutant by exiting non-zero. `include` and `exclude` are
 regular expressions over source paths; the default excludes `vendor/` and
 test directories. `mutators` picks Mull's mutators, and the default is Mull's
 own set. The summary has a per-file table of killed and surviving mutants

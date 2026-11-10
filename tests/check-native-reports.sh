@@ -57,7 +57,7 @@ if [ "$part" = all ] || [ "$part" = mutation ]; then
   while IFS= read -r kv; do [ -n "$kv" ] && export "${kv%%=*}=${kv#*=}"; done < "$envf"
   ( cd "$d" && GITHUB_ENV="$envf" RUNNER_TEMP="$d" INCLUDE="" EXCLUDE=".*/test\.c" TIMEOUT=10000 \
       MUTATORS=$'cxx_gt_to_ge\ncxx_gt_to_le' \
-      BUILD='$MULL_CC src/lib.c test.c -o mtest' bash "$work/mut-configure.sh" )
+      BUILD='$MULL_CC -c src/lib.c -o lib.o && $MULL_CC -c test.c -o test.o && $MULL_CC lib.o test.o -o mtest' bash "$work/mut-configure.sh" )
   while IFS= read -r kv; do [ -n "$kv" ] && export "${kv%%=*}=${kv#*=}"; done < "$envf"
   ( cd "$d" && RUNNER_TEMP="$d" TESTS=mtest bash "$work/mut-run.sh" > "$d/run.log" 2>&1 )
   ( cd "$d" && GITHUB_WORKSPACE="$d" GITHUB_STEP_SUMMARY="$d/summary.md" bash "$work/mut-report.sh" > /dev/null )

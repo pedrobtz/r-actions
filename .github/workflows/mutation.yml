@@ -19,7 +19,7 @@
 #     mutation:
 #       uses: pedrobtz/r-actions/.github/workflows/mutation.yml@v1
 #       with:
-#         build: make -C ctest zuh_ctest CC="$MULL_CC"
+#         build: make -C ctest zuh_ctest CC="$MULL_CC"   # one -c per file
 #         tests: ctest/zuh_ctest
 #
 # Reported, never gated, and slow: run it on a schedule or by dispatch. The
@@ -50,7 +50,11 @@ on:
           Shell command that builds the test binaries with Mull. `$MULL_CC`
           is clang with the Mull plugin and the flags it needs (`-O0 -g
           -grecord-command-line`); pass it as the compiler. Everything else
-          about the build is the caller's.
+          about the build is the caller's, with one constraint: compile each
+          source file in a command of its own (`-c`, as make does) and link
+          separately. Mull re-parses every file from its recorded command
+          line, and a command that compiles several files at once cannot be
+          re-parsed.
         type: string
         required: true
       tests:
@@ -367,11 +371,11 @@ jobs:
             fi
             if [ -n "$INCLUDE" ]; then
               echo "includePaths:"
-              printf '%s\n' "$INCLUDE" | sed '/^$/d; s/.*/  - "&"/'
+              printf '%s\n' "$INCLUDE" | sed "/^\$/d; s/'/''/g; s/.*/  - '&'/"
             fi
             if [ -n "$EXCLUDE" ]; then
               echo "excludePaths:"
-              printf '%s\n' "$EXCLUDE" | sed '/^$/d; s/.*/  - "&"/'
+              printf '%s\n' "$EXCLUDE" | sed "/^\$/d; s/'/''/g; s/.*/  - '&'/"
             fi
           } > "$cfg"
           cat "$cfg"
