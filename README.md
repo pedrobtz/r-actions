@@ -383,6 +383,26 @@ file may be entirely correct: a bundled library carries modules the package
 never calls and cannot drop from the tarball. This number wants reading, not
 defending.
 
+Below the table the job lists where the gaps are, because a percentage
+cannot say which code is missing:
+
+```
+## Functions never entered
+src/parser.c:2 never
+
+## One-sided conditions: the line ran, some branch outcome never did
+src/parser.c: 7 11
+
+## Lines never executed
+src/parser.c: 2-3 8 12
+```
+
+A one-sided condition is the shape the branch column counts: a line every
+test runs, with a branch outcome none of them takes. The job summary shows
+the functions (up to 50). The log shows all three lists, and the
+`native-coverage` artifact holds them as `native-gaps.txt`.
+`native-exclude` applies to the lists as well as the table.
+
 `native-run` replaces the default (running each file in `tests/` the way
 `R CMD check` does) when coverage should reflect something else — a
 conformance corpus, a replay driver. `native-exclude` drops paths from the

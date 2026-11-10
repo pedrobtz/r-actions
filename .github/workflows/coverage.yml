@@ -566,6 +566,7 @@ jobs:
           } > ../summary.md
 
           shown=0
+          : > /tmp/shown
           while IFS="$(printf '\t')" read -r file lpct lnum tpct tnum; do
             # gcov names headers and system files too; only the package's own
             # sources are the subject here.
@@ -582,6 +583,7 @@ jobs:
             done < /tmp/patterns
             if [ -n "$hit" ]; then continue; fi
             shown=$((shown + 1))
+            printf '%s\n' "$file" >> /tmp/shown
             # gcov says "No branches" instead of "Taken at least once" for a
             # file that has none, so there is nothing to put a percentage on.
             if [ "$tpct" = "-" ]; then
@@ -605,12 +607,95 @@ jobs:
           cat ../summary.md >> "$GITHUB_STEP_SUMMARY"
           cat ../summary.md
 
+          # The lists behind the table: which functions no test enters,
+          # which conditions ran but only ever went one way, and which lines
+          # never ran. A percentage says how much; these say where, which is
+          # what the next test needs. Read from the .gcov files gcov just
+          # wrote, for the files the table kept, so native-exclude applies.
+          #
+          # A .gcov line is "count:line:source", the count "-" for no code
+          # and "#####" (or "=====", "%%%%%") for never run; "N*" marks a
+          # partly run line. "function NAME called N ..." precedes the
+          # function's first line, and "branch K taken N" follows the line
+          # the branch is on.
+          cat > /tmp/gaps.awk <<'AWK'
+          # shown: one source path per line, as gcov names it, for the files the
+          # table kept. Then every .gcov file. Writes the full report to stdout.
+          FNR == 1 && FILENAME != shownfile { src = ""; pend = "" }
+          FILENAME == shownfile { keep[$0] = 1; next }
+          /^ *-: *0:Source:/ { s = $0; sub(/^ *-: *0:Source:/, "", s); src = (s in keep) ? s : ""; next }
+          src == "" { next }
+          /^function / { pend = $2; called = $4 + 0; next }
+          /^branch / {
+              if (!(src SUBSEP ln in ran)) next
+              if ($3 == "taken") { if ($4 + 0 > 0) yes[src, ln] = 1; else no[src, ln] = 1 }
+              next
+          }
+          /^ *[^ :]+: *[0-9]+:/ {
+              split($0, p, ":"); c = p[1]; gsub(/ /, "", c); ln = p[2] + 0
+              if (ln == 0 || c == "-") next
+              files[src] = 1; if (ln > maxl[src]) maxl[src] = ln
+              if (c ~ /^(#####|=====|%%%%%)$/) miss[src, ln] = 1
+              else { sub(/\*$/, "", c); if (c + 0 > 0) ran[src, ln] = 1; else miss[src, ln] = 1 }
+              if (pend != "") { if (!called) { nf++; fns[nf] = "src/" src ":" ln " " pend }; pend = "" }
+              next
+          }
+          END {
+              n = 0; for (f in files) order[++n] = f
+              for (i = 2; i <= n; i++) for (j = i; j > 1 && order[j-1] > order[j]; j--) { t = order[j]; order[j] = order[j-1]; order[j-1] = t }
+              print "## Functions never entered"
+              for (i = 1; i <= nf; i++) print fns[i]
+              if (!nf) print "(none)"
+              print ""
+              print "## One-sided conditions: the line ran, some branch outcome never did"
+              for (i = 1; i <= n; i++) {
+                  f = order[i]; s = ""
+                  for (l = 1; l <= maxl[f]; l++) if (((f, l) in yes) && ((f, l) in no)) s = s " " l
+                  if (s != "") print "src/" f ":" s
+              }
+              print ""
+              print "## Lines never executed"
+              for (i = 1; i <= n; i++) {
+                  f = order[i]; s = ""; a = 0
+                  for (l = 1; l <= maxl[f] + 1; l++) {
+                      if (l <= maxl[f] && !((f, l) in miss) && !((f, l) in ran)) continue
+                      if (l <= maxl[f] && ((f, l) in miss)) { if (!a) a = l; b = l; continue }
+                      if (a) s = s " " (a == b ? a : a "-" b)
+                      a = 0
+                  }
+                  if (s != "") print "src/" f ":" s
+              }
+          }
+          AWK
+          find . -name '*.gcov' | sort |
+            xargs awk -v shownfile=/tmp/shown -f /tmp/gaps.awk /tmp/shown > ../native-gaps.txt
+          cat ../native-gaps.txt
+
+          {
+            echo
+            echo "### Functions no test enters"
+            echo
+            nfn=$(awk '/^## Functions/{p=1; next} /^$/{p=0} p && !/^\(none\)$/' ../native-gaps.txt | wc -l | tr -d ' ')
+            if [ "$nfn" -eq 0 ]; then
+              echo "None."
+            else
+              echo '```'
+              awk '/^## Functions/{p=1; next} /^$/{p=0} p' ../native-gaps.txt | head -50
+              echo '```'
+              if [ "$nfn" -gt 50 ]; then echo "and $((nfn - 50)) more."; fi
+            fi
+            echo
+            echo "One-sided conditions and the lines never executed are in the"
+            echo "log and in \`native-gaps.txt\` in the \`native-coverage\` artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/upload-artifact@v7
         if: always() && steps.probe.outputs.skip == 'false'
         with:
           name: native-coverage
           path: |
             native-coverage.tsv
+            native-gaps.txt
             src/gcov.log
             src/*.gcov
           if-no-files-found: ignore
