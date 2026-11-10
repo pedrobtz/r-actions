@@ -27,6 +27,9 @@ jobs:
       seed-corpus: tests/yaml-test-suite
       dictionary: tools/fuzz/yaml.dict
       max-total-time: ${{ github.event_name == 'schedule' && 1800 || 120 }}
+      # Fail when the corpus reaches less than this share of the lines in
+      # sources; set a little under the figure the first run reports.
+      reach-floor: 0
 
   # A red scheduled run otherwise notifies only whoever last edited the cron
   # line. This files one issue per distinct finding, labelled fuzz, with the

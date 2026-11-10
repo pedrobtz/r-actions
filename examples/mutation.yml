@@ -1,0 +1,20 @@
+# Mutation testing of the C tests that run outside R. Slow, so weekly and
+# on demand; reported, never gated. Read the survivors in the job summary.
+on:
+  schedule:
+    - cron: "41 4 * * 6"
+  workflow_dispatch:
+
+name: mutation
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    uses: pedrobtz/r-actions/.github/workflows/mutation.yml@v1
+    with:
+      # Each source compiled by its own command (make does this); $MULL_CC
+      # is clang with the Mull plugin.
+      build: make -C ctest test_binary CC="$MULL_CC"
+      tests: ctest/test_binary
