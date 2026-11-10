@@ -1111,6 +1111,53 @@ Ubuntu, so these are Ubuntu's package names — the same ones a runner's
 library built against libstdc++ will link only if the package uses no symbol
 that depends on that ABI.
 
+### `platforms.yml` — a package's own checks, one job per OS
+
+A package's local workflows tend to add a macOS job and a Windows job each:
+a C core suite, a network slice, a fuzz-corpus replay, an ABI probe. Each is a
+runner, and macOS runners are the scarce kind: a free account runs about five
+at once, so a few open pull requests with eight macOS jobs apiece queue behind
+one another, and some end in "The job was not acquired by Runner of type
+hosted". Most of those jobs take a minute or two.
+
+`platforms.yml` runs them as the steps of **one job per OS**. The checks stay
+the package's: it writes `tools/ci/platform.sh`, which runs once per runner as
+`bash tools/ci/platform.sh <os>` (`macos`, `windows` or `ubuntu`) with
+`R_ACTIONS_PROFILE` set to `quick` or `full`. A script keeps its slow extras
+for `full`, which `profile: auto` gives a manual dispatch, a schedule and a
+`full-ci` pull request.
+
+```bash
+#!/bin/sh
+# tools/ci/platform.sh: every per-OS check, in order; set -e names the one that failed.
+set -eu
+os=$1
+cc=cc; [ "$os" = windows ] && cc="$(R CMD config CC)"
+make -C ctest strict CC="$cc"
+[ "$os" = windows ] || make -C ctest asan
+if [ "$R_ACTIONS_PROFILE" = full ]; then
+  make -C fuzz replay-run CC="$cc"
+fi
+```
+
+```yaml
+jobs:
+  platforms:
+    uses: pedrobtz/r-actions/.github/workflows/platforms.yml@v1
+    with:
+      profile: auto
+```
+
+Inputs: `script` (default `tools/ci/platform.sh`), `os` (a JSON array of
+runner labels, default macOS and Windows), `setup-r` (default true, which on
+Windows is also what puts Rtools on the PATH), `r-dependencies`,
+`python-version`, `timeout-minutes`, `profile` and `skip-docs-only`. The
+whole example is [`examples/platforms.yml`](examples/platforms.yml).
+
+The portfolio's rule (`packages/claude/shared/ci.md`): a package's own per-OS
+checks go through this workflow, so a pull request runs at most one macOS and
+one Windows job beyond r-cmd-check's.
+
 ### `fuzz.yml` — coverage-guided fuzzing
 
 Random fuzzing and coverage-guided fuzzing are not the same tool. A loop that

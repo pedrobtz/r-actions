@@ -150,3 +150,15 @@ jobs:
 
       - name: Check the major tag is not stale
         run: bash tests/check-major-tag.sh v1
+
+  # platforms.yml is the one reusable workflow whose work is a script the
+  # caller supplies, so it can run here: on Linux only, with R skipped, against
+  # a fixture that checks the OS argument and the resolved profile arrive.
+  platforms:
+    uses: ./.github/workflows/platforms.yml
+    with:
+      script: tests/fixtures/platforms/platform.sh
+      os: '["ubuntu-latest"]'
+      setup-r: false
+      profile: auto
+      skip-docs-only: false

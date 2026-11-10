@@ -1,0 +1,26 @@
+# A package's own per-OS checks, one job per OS: copy this to
+# .github/workflows/platforms.yaml and write tools/ci/platform.sh.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 4 * * 1"
+
+name: platforms
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  platforms:
+    uses: pedrobtz/r-actions/.github/workflows/platforms.yml@v1
+    with:
+      profile: auto
+      # python-version: "3.12"     # if a check needs it
+      # r-dependencies: true       # if a check installs the package

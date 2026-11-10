@@ -27,7 +27,7 @@ WRITERS = {
 # anyway. A new reusable workflow must be put in one or the other.
 GATED = {
     "alloc-failure.yml", "analyzers.yml", "arch.yml", "changes.yml", "cran-special.yml",
-    "fuzz.yml", "gctorture.yml", "lto.yml", "mutation.yml", "r-cmd-check.yml", "rchk.yml",
+    "fuzz.yml", "gctorture.yml", "lto.yml", "mutation.yml", "platforms.yml", "r-cmd-check.yml", "rchk.yml",
     "sanitizers.yml", "threadcheck.yml", "valgrind.yml",
 }
 UNGATED = {

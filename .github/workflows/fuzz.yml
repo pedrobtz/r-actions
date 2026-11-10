@@ -125,6 +125,24 @@ on:
         type: number
         required: false
         default: 120
+      profile:
+        description: >
+          `quick` fuzzes for `quick-max-total-time` in place of
+          `max-total-time`; anything else, the default `full` included, for
+          `max-total-time`. `auto` is `full` on a manual dispatch, a schedule
+          and a `full-ci` pull request, `quick` otherwise: the same input, with
+          the same meaning, as gctorture.yml's.
+        type: string
+        required: false
+        default: full
+      quick-max-total-time:
+        description: >
+          `max-total-time` under `profile: quick`. Thirty seconds still runs
+          the build, the seed corpus and the oracle on every pull request;
+          the long run is the schedule's.
+        type: number
+        required: false
+        default: 30
       libfuzzer-args:
         description: >
           Extra arguments passed to the fuzz target, e.g. `-max_len=65536`
@@ -244,6 +262,7 @@ permissions:
 # carries it: the name in its `skip-ci:<name>` label.
 env:
   R_ACTIONS_WORKFLOW: fuzz
+  R_ACTIONS_PROFILE: ${{ inputs.profile }}
 
 jobs:
   # Skips the jobs below when a push or pull request changes documentation
@@ -482,7 +501,7 @@ jobs:
       # before anything is installed, so the mismatch costs seconds.
       - name: Check the time budget
         env:
-          MAX_TIME: ${{ inputs.max-total-time }}
+          MAX_TIME: ${{ needs.changes.outputs.profile == 'quick' && inputs.quick-max-total-time || inputs.max-total-time }}
           TIMEOUT: ${{ inputs.timeout-minutes }}
         run: |
           set -eu
@@ -659,7 +678,7 @@ jobs:
         id: run
         env:
           DICT: ${{ inputs.dictionary }}
-          MAX_TIME: ${{ inputs.max-total-time }}
+          MAX_TIME: ${{ needs.changes.outputs.profile == 'quick' && inputs.quick-max-total-time || inputs.max-total-time }}
           EMBED_R: ${{ inputs.embed-r }}
           EXTRA: ${{ inputs.libfuzzer-args }}
         run: |
