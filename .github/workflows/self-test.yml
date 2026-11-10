@@ -109,6 +109,19 @@ jobs:
           /tmp/native/bin/pip install --quiet pyyaml
           PATH="/tmp/native/bin:$PATH" bash tests/check-native-reports.sh
 
+  alloc-sweep:
+    name: alloc-failure sweep fails on the package's crashes only
+    # A wrong answer here either hides a package crash under
+    # ignore-crash-pattern, or keeps the job red for the interpreter's bugs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the sweep step on a scripted workload
+        run: |
+          python3 -m venv /tmp/sweep
+          /tmp/sweep/bin/pip install --quiet pyyaml
+          PATH="/tmp/sweep/bin:$PATH" bash tests/check-alloc-sweep.sh
+
   major-tag:
     name: v1 tracks the newest release
     # Tags do not move on a pull request, so this would only ever report the

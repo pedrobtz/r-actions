@@ -1328,6 +1328,20 @@ metadata, building inputs — in `baseline-run` as well as in `run`, so it sits
 under the floor, and consider `R_ENABLE_JIT=0` in both. A failed allocation
 inside R's byte-code compiler or its regex engine can crash R itself, which
 is a finding about R rather than about your package.
+`ignore-crash-pattern` lists a crash apart instead of failing on it, when its
+output matches. Use it for the interpreter's own crashes. R's TRE regex
+compiler and `gzfile()` segfault on a failed allocation, under `grepl()`,
+`sub()` and `strsplit()`, and a sweep over any R workload finds them. Match
+on the top R frame, so that a crash under `.Call()` into the package still
+fails:
+
+```yaml
+      ignore-crash-pattern: "^ 1: (grepl?|sub|gsub|strsplit|gzfile)\\("
+```
+
+Setting `R_ENABLE_JIT=0` in `run` and `baseline-run` keeps the byte
+compiler's regex calls out of the sweep too.
+
 ### `arch.yml` — architectures the check matrix never reaches
 
 `r-cmd-check.yml` covers CRAN's compilers well and its architectures barely at
