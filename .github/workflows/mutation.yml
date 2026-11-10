@@ -1,0 +1,430 @@
+# Mutation testing of the package's C: which small edits to the code no test
+# notices.
+#
+# Coverage says a line ran. It cannot say whether anything checked what the
+# line did, and that is where the bugs were: 14 of the 16 that three reviews
+# found in zuhttp on 2026-11-09 sat in code the suite already ran, under
+# tests that compared nothing. Mutation testing measures exactly that gap. It
+# changes the code one operator at a time -- `<` to `<=`, `+` to `-`, a call
+# removed, a condition negated -- reruns the tests, and reports each mutant
+# no test kills. A surviving mutant is a statement nothing checks.
+#
+# Mull (https://github.com/mull-project/mull) does the work. It is a clang
+# plugin: the caller's own build compiles the test binaries with it, the
+# mutants are embedded in those binaries, and mull-runner runs each binary
+# once per mutant. The caller says how to build and what to run, because only
+# the package knows: a C test suite outside R is the natural target, and a
+# package without one has nothing for this job to run.
+#
+#     mutation:
+#       uses: pedrobtz/r-actions/.github/workflows/mutation.yml@v1
+#       with:
+#         build: make -C ctest zuh_ctest CC="$MULL_CC"
+#         tests: ctest/zuh_ctest
+#
+# Reported, never gated, and slow: run it on a schedule or by dispatch. The
+# survivors want reading, not a score to defend. An equivalent mutant (one
+# that changes nothing observable) survives by definition, and an allocation-
+# failure branch survives unless the tests inject failures.
+on:
+  workflow_call:
+    inputs:
+      skip-docs-only:
+        description: >
+          Skip every job here when a push or pull request changes
+          documentation only: Markdown at the top level or under a dot
+          directory (`.github/`, `.agents/`), `_pkgdown.yml`, and `pkgdown/`.
+          Anything else runs as before, `man/`, `vignettes/` and the `.md`
+          snapshots under `tests/` included. So does every case where the
+          changed files cannot be listed: a new branch, a force-push, an API
+          failure, a manual or scheduled run.
+
+          DESCRIPTION, README.Rmd and README.qmd are skipped here too:
+          r-cmd-check gives such a change its one check. See
+          "Documentation-only changes" in the README.
+        type: boolean
+        required: false
+        default: true
+      build:
+        description: >
+          Shell command that builds the test binaries with Mull. `$MULL_CC`
+          is clang with the Mull plugin and the flags it needs (`-O0 -g
+          -grecord-command-line`); pass it as the compiler. Everything else
+          about the build is the caller's.
+        type: string
+        required: true
+      tests:
+        description: >
+          Space-separated test executables, relative to the repository root,
+          each run by mull-runner. A test fails, and so kills the mutant, by
+          exiting non-zero.
+        type: string
+        required: true
+      include:
+        description: >
+          Regular expressions, one per line, for the source paths to mutate.
+          Empty mutates everything compiled with `$MULL_CC` that `exclude`
+          does not drop.
+        type: string
+        required: false
+        default: ""
+      exclude:
+        description: >
+          Regular expressions, one per line, for source paths not to mutate.
+          The default drops vendored code and the tests themselves.
+        type: string
+        required: false
+        default: |
+          .*/vendor/.*
+          .*/ctest/.*
+          .*/tests?/.*
+      mutators:
+        description: >
+          Mull mutators or groups, one per line, for example `cxx_default`
+          or `cxx_gt_to_ge`. Empty uses Mull's default set.
+        type: string
+        required: false
+        default: ""
+      llvm:
+        description: The LLVM major version Mull is installed for.
+        type: string
+        required: false
+        default: "18"
+      mutant-timeout:
+        description: Milliseconds a mutant's run may take before it counts as killed.
+        type: number
+        required: false
+        default: 30000
+      timeout-minutes:
+        type: number
+        required: false
+        default: 120
+
+name: mutation
+
+permissions:
+  contents: read
+
+# Read by the `changes` job, which is identical in every workflow that
+# carries it: the name in its `skip-ci:<name>` label.
+env:
+  R_ACTIONS_WORKFLOW: mutation
+
+jobs:
+  # Skips the jobs below when a push or pull request changes documentation
+  # only; see the `skip-docs-only` input. Every workflow it gates carries an
+  # identical copy -- inline for the reason sanitizers.yml gives for not
+  # factoring out a composite action -- and tests/lint-workflows.py keeps the
+  # copies identical and the wiring complete.
+  #
+  # The gated jobs test `!cancelled()` in place of the implicit `success()`,
+  # so this job failing, or being skipped, runs them rather than dropping
+  # them. Only an explicit `docs-only=true` skips anything.
+  changes:
+    name: docs-only gate
+    # It always runs, because it also resolves `profile` and reads the pull
+    # request's labels. `skip-docs-only: false` turns off the file rules
+    # only; a label on a pull request is a decision someone made about that
+    # pull request, and still applies.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs-only: ${{ steps.classify.outputs.docs-only }}
+      scope: ${{ steps.classify.outputs.scope }}
+      profile: ${{ steps.classify.outputs.profile }}
+    steps:
+      - name: Classify the changed files and the labels
+        id: classify
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          FORCED: ${{ github.event.forced }}
+          FILE_RULES: ${{ inputs.skip-docs-only }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          # R_ACTIONS_WORKFLOW (the name in `skip-ci:<name>`) and
+          # R_ACTIONS_PROFILE (the `profile` input, where there is one) come
+          # from the workflow-level `env`, so that this job stays identical
+          # in every workflow that carries it.
+        run: |
+          # Anything short of a complete list of changed files, every one of
+          # them documentation or package metadata, leaves this false and
+          # every job runs -- unless a label on the pull request says
+          # otherwise.
+          #
+          # `scope` is `docs`, `metadata` or `code`. `docs-only` is true for
+          # the first two: every job gated on it skips both. r-cmd-check
+          # alone reads `scope`, and runs its quick runner legs for
+          # `metadata`, so a DESCRIPTION edit still gets one R CMD check.
+          docs_only=false scope=code profile=full
+          trap '{ echo "docs-only=$docs_only"; echo "scope=$scope"; echo "profile=$profile"; } >> "$GITHUB_OUTPUT"' EXIT
+
+          is_pr=false
+          case "$EVENT" in pull_request|pull_request_target) is_pr=true ;; esac
+          labels=""
+          if [ "$is_pr" = true ]; then
+            labels=$(jq -r '.[]?' <<<"$LABELS" 2>/dev/null || true)
+          fi
+          has_label() { grep -qxF -- "$1" <<<"$labels"; }
+
+          # `auto` is quick by default. A manual dispatch, a schedule and the
+          # `full-ci` label on a pull request make it full; a push to main
+          # stays quick. Any other value keeps its old meaning: `quick` is
+          # quick, anything else is full.
+          case "${R_ACTIONS_PROFILE:-full}" in
+            auto)
+              case "$EVENT" in
+                workflow_dispatch|schedule) ;;
+                *) has_label full-ci || profile=quick ;;
+              esac ;;
+            quick) profile=quick ;;
+          esac
+          echo "profile: $profile"
+
+          # Labels change pull request runs only. The push after merge
+          # carries none and is classified by its files, so anything a label
+          # skips here still runs on the default branch. `full-ci` asks for
+          # more checking, so it overrides every label that asks for less.
+          if [ -n "$labels" ] && ! has_label full-ci; then
+            if [ -n "${R_ACTIONS_WORKFLOW:-}" ] && has_label "skip-ci:${R_ACTIONS_WORKFLOW}"; then
+              docs_only=true scope=docs
+              echo "Skipped by the \`skip-ci:${R_ACTIONS_WORKFLOW}\` label: every job in this workflow is skipped on this pull request." \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            if has_label ci:minimal; then
+              docs_only=true scope=metadata
+              echo "Reduced by the \`ci:minimal\` label: r-cmd-check runs its quick runner legs, and every other gated job is skipped on this pull request." \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
+
+          if [ "$FILE_RULES" != true ]; then
+            echo "skip-docs-only is false, so the changed files are not consulted."
+            exit 0
+          fi
+
+          case "$EVENT" in
+            pull_request|pull_request_target)
+              base=$PR_BASE head=$PR_HEAD ;;
+            push)
+              # `before` is all zeros for a new branch, and after a
+              # force-push it may no longer exist.
+              if [ "$FORCED" = true ] || [ -z "${BEFORE//0/}" ]; then
+                echo "New branch or force-push: no diff to go by, so everything runs."
+                exit 0
+              fi
+              base=$BEFORE head=$AFTER ;;
+            *)
+              echo "A $EVENT run has no changed files to go by, so everything runs."
+              exit 0 ;;
+          esac
+
+          # The compare API rather than the pull request's file list, which
+          # would need `pull-requests: read`: a scope the caller may not hold,
+          # and asking for one is a startup_failure. Three dots diff from the
+          # merge base, which for a pull request is exactly what it changes,
+          # from its first commit on.
+          # A rename is listed under its new name, with the old one in
+          # previous_filename; both count, or `git mv R/x.R x.md` reads as a
+          # documentation-only change.
+          if ! files=$(gh api "repos/$REPO/compare/$base...$head" \
+                         --jq '(.files // []) | length, (.[] | .filename, (.previous_filename // empty))'); then
+            echo "Could not list the changed files, so everything runs."
+            exit 0
+          fi
+
+          # compare lists at most 300 files and truncates silently past that.
+          count=$(head -n 1 <<<"$files")
+          if ! [[ $count =~ ^[0-9]+$ ]] || [ "$count" -eq 0 ] || [ "$count" -ge 300 ]; then
+            echo "Cannot rely on a list of '$count' changed files, so everything runs."
+            exit 0
+          fi
+
+          # The caller's own workflow file. In a called workflow
+          # `github.workflow_ref` is the caller's, `<repo>/<path>@<ref>`. An
+          # edit to that file is code -- a CI change has to test itself --
+          # while an edit to any other workflow in the repository changes
+          # nothing this workflow runs. If the ref is not in that shape,
+          # every workflow file counts as code.
+          caller=""
+          case "$WORKFLOW_REF" in
+            "$REPO"/*@*) caller=${WORKFLOW_REF#"$REPO"/}; caller=${caller%%@*} ;;
+          esac
+
+          # Markdown in `tests/` is not documentation -- testthat snapshots
+          # and fixtures are .md -- and neither is Markdown under `fuzz/` or
+          # `inst/`, so .md counts only at the top level or under a dot
+          # directory, which a package does not ship.
+          #
+          # Repository housekeeping counts as documentation too: nothing here
+          # builds, installs or checks it. CRAN-SUBMISSION is
+          # devtools::submit_cran()'s record of the submitted commit, and
+          # .gitignore changes what git tracks, not what R CMD build ships
+          # (that is .Rbuildignore, which is code).
+          #
+          # DESCRIPTION and the README sources are `meta`: a version bump, a
+          # URL or a reworded Description is worth one check, not the
+          # sanitizers. README.Rmd is usually build-ignored, but it is
+          # executed to render README.md, so it is not treated as prose.
+          all_docs=true any_meta=false
+          while IFS= read -r f; do
+            case "$f" in
+              _pkgdown.yml|_pkgdown.yaml|pkgdown/*) kind=docs ;;
+              DESCRIPTION|README.Rmd|README.qmd) kind=meta ;;
+              CRAN-SUBMISSION|.gitignore|CODEOWNERS|.github/CODEOWNERS) kind=docs ;;
+              .github/ISSUE_TEMPLATE/*|.github/PULL_REQUEST_TEMPLATE*) kind=docs ;;
+              .github/dependabot.yml|.github/dependabot.yaml|.github/FUNDING.yml) kind=docs ;;
+              .github/workflows/*)
+                if [ -n "$caller" ] && [ "$f" != "$caller" ]; then kind=docs; else kind=code; fi ;;
+              .*/*.md) kind=docs ;;
+              */*) kind=code ;;
+              *.md) kind=docs ;;
+              *) kind=code ;;
+            esac
+            printf '%-5s %s\n' "$kind" "$f"
+            case "$kind" in
+              docs) ;;
+              meta) any_meta=true ;;
+              *) all_docs=false ;;
+            esac
+          done < <(tail -n +2 <<<"$files")
+
+          if [ "$all_docs" = true ] && [ "$any_meta" = true ]; then
+            docs_only=true scope=metadata
+            echo "Documentation and package metadata only: r-cmd-check runs its quick runner legs, and every other gated job is skipped." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$all_docs" = true ]; then
+            docs_only=true scope=docs
+            echo "Documentation only: the jobs in this workflow are skipped." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+
+  mutation:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs-only != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Mull publishes Debian packages per LLVM version on Cloudsmith; the
+      # runner's clang has to be the same major version as the plugin.
+      - name: Install clang and Mull
+        env:
+          LLVM: ${{ inputs.llvm }}
+        run: |
+          set -eu
+          sudo apt-get update -q
+          sudo apt-get install -y -q "clang-${LLVM}" "llvm-${LLVM}"
+          curl -1sLf 'https://dl.cloudsmith.io/public/mull-project/mull-stable/setup.deb.sh' \
+            | sudo -E bash
+          sudo apt-get install -y -q "mull-${LLVM}"
+          plugin=$(ls /usr/lib/mull-ir-frontend-"${LLVM}"* | head -1)
+          [ -e "$plugin" ] || { echo "::error::no Mull plugin for LLVM ${LLVM}"; exit 1; }
+          echo "MULL_CC=clang-${LLVM} -fpass-plugin=${plugin} -O0 -g -grecord-command-line" >> "$GITHUB_ENV"
+          echo "MULL_RUNNER=mull-runner-${LLVM}" >> "$GITHUB_ENV"
+
+      # The plugin reads its configuration at compile time, from the file
+      # MULL_CONFIG names, so the filters are decided before the build.
+      - name: Configure and build
+        env:
+          INCLUDE: ${{ inputs.include }}
+          EXCLUDE: ${{ inputs.exclude }}
+          MUTATORS: ${{ inputs.mutators }}
+          TIMEOUT: ${{ inputs.mutant-timeout }}
+          BUILD: ${{ inputs.build }}
+        run: |
+          set -eu
+          cfg="$RUNNER_TEMP/mull.yml"
+          {
+            echo "timeout: ${TIMEOUT}"
+            if [ -n "${MUTATORS:-}" ]; then
+              echo "mutators:"
+              printf '%s\n' "$MUTATORS" | sed '/^$/d; s/.*/  - &/'
+            fi
+            if [ -n "$INCLUDE" ]; then
+              echo "includePaths:"
+              printf '%s\n' "$INCLUDE" | sed '/^$/d; s/.*/  - "&"/'
+            fi
+            if [ -n "$EXCLUDE" ]; then
+              echo "excludePaths:"
+              printf '%s\n' "$EXCLUDE" | sed '/^$/d; s/.*/  - "&"/'
+            fi
+          } > "$cfg"
+          cat "$cfg"
+          echo "MULL_CONFIG=$cfg" >> "$GITHUB_ENV"
+          export MULL_CONFIG="$cfg"
+          sh -c "$BUILD"
+
+      # One mull-runner per binary. The IDE reporter prints one
+      # "file:line:col: warning: Survived: ..." line per surviving mutant,
+      # which is what the summary is built from.
+      - name: Run the mutants
+        env:
+          TESTS: ${{ inputs.tests }}
+        run: |
+          set -eu
+          : > "$RUNNER_TEMP/mull.log"
+          for t in $TESTS; do
+            [ -x "$t" ] || { echo "::error::$t is not an executable the build produced"; exit 1; }
+            echo "::group::mull-runner $t"
+            "$MULL_RUNNER" --ide-reporter-show-killed "$t" 2>&1 | tee -a "$RUNNER_TEMP/mull.log" || true
+            echo "::endgroup::"
+          done
+          cp "$RUNNER_TEMP/mull.log" mull.log
+
+      - name: Report the survivors
+        run: |
+          set -eu
+          root="$GITHUB_WORKSPACE/"
+          # Paths repository-relative, so the report reads the same anywhere.
+          grep -E ': warning: Survived:' mull.log | sed "s#^${root}##" | sort -u > survivors.txt || true
+          grep -E ': warning: Killed:' mull.log | sed "s#^${root}##" | sort -u > killed.txt || true
+          s=$(wc -l < survivors.txt | tr -d ' '); k=$(wc -l < killed.txt | tr -d ' ')
+          if [ $((s + k)) -eq 0 ]; then
+            echo "::warning::no mutants were reported: check that the build used \$MULL_CC and that the filters keep some source"
+          fi
+          {
+            echo "## Mutation testing"
+            echo
+            if [ $((s + k)) -gt 0 ]; then
+              echo "$k killed, $s survived: $(( 100 * k / (s + k) ))% killed."
+            else
+              echo "No mutants were reported."
+            fi
+            echo
+            echo "| File | Killed | Survived |"
+            echo "|:-----|-------:|---------:|"
+            cat killed.txt survivors.txt | cut -d: -f1 | sort -u | while read -r f; do
+              echo "| \`$f\` | $(grep -c "^$f:" killed.txt || true) | $(grep -c "^$f:" survivors.txt || true) |"
+            done
+            echo
+            echo "### Survivors"
+            echo
+            echo "Each is a change to the code that no test noticed. Up to 200 here;"
+            echo "all of them are in \`survivors.txt\` in the \`mutation\` artifact."
+            echo
+            echo '```'
+            sed 's/: warning: Survived:/:/' survivors.txt | head -200
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mutation
+          path: |
+            mull.log
+            survivors.txt
+            killed.txt
+          if-no-files-found: ignore
+          retention-days: 7

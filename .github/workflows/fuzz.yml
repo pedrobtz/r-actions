@@ -140,6 +140,18 @@ on:
         type: boolean
         required: false
         default: true
+      reach-floor:
+        description: >
+          Fail when the corpus reaches less than this percentage of the
+          lines in `sources`. After a green run, the job replays the corpus
+          through a coverage build and reports what it reaches: a per-file
+          table, the functions no input enters, the conditions inputs only
+          ever take one way, and the lines no input reaches. 0, the default,
+          only reports. Set it a little under the figure once seen, so a
+          harness change that stops reaching code goes red.
+        type: number
+        required: false
+        default: 0
       github-packages:
         description: >
           Repositories on GitHub whose sources the fuzz target compiles
@@ -487,7 +499,7 @@ jobs:
       - name: Install clang
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang
+          sudo apt-get install -y clang llvm
 
       - name: Check out GitHub packages
         if: inputs.github-packages != ''
@@ -801,6 +813,137 @@ jobs:
             tail -20 merge.log
             rm -rf corpus.min
           fi
+
+      # What the corpus reaches, and where it does not. A fuzzer that runs
+      # green proves no input crashed; it says nothing about which code no
+      # input ever entered, or which conditions the inputs only ever took
+      # one way -- the shape of a bug that needs the other side. The same
+      # sources, built for coverage instead of with sanitizers, replay the
+      # corpus once each (-runs=0), and llvm-cov reports on `sources` alone.
+      - name: Fuzz reach
+        if: success()
+        env:
+          HARNESS: ${{ inputs.harness }}
+          CFLAGS_IN: ${{ inputs.cflags }}
+          EMBED_R: ${{ inputs.embed-r }}
+          FLOOR: ${{ inputs.reach-floor }}
+        run: |
+          set -eu
+          r_cppflags=""; r_ldflags=""
+          if [ "$EMBED_R" = true ]; then
+            r_home=$(R RHOME)
+            r_cppflags=$(R CMD config --cppflags)
+            r_ldflags="-L$r_home/lib -lR -Wl,-rpath,$r_home/lib"
+          fi
+          # shellcheck disable=SC2046
+          clang $CFLAGS_IN $r_cppflags -fsanitize=fuzzer -fprofile-instr-generate \
+            -fcoverage-mapping "$HARNESS" $(cat sources.txt) -o fuzz-reach $r_ldflags
+          leaks=""; if [ "$EMBED_R" = true ]; then leaks="-detect_leaks=0"; fi
+          # shellcheck disable=SC2086
+          LLVM_PROFILE_FILE=reach.profraw ./fuzz-reach -runs=0 $leaks corpus > reach-run.log 2>&1 \
+            || { tail -20 reach-run.log; echo "::error::the coverage build failed replaying the corpus"; exit 1; }
+          llvm-profdata merge -sparse reach.profraw -o reach.profdata
+          # shellcheck disable=SC2046
+          llvm-cov export ./fuzz-reach -instr-profile=reach.profdata -format=lcov \
+            $(cat sources.txt) > fuzz-reach.lcov
+
+          python3 - fuzz-reach.lcov "$FLOOR" <<'PY' | tee fuzz-reach.txt
+          import os, sys
+          lcov, floor = sys.argv[1], float(sys.argv[2])
+          ws = os.environ.get("GITHUB_WORKSPACE", "") + "/"
+          files = {}
+          f = None
+          for line in open(lcov):
+              line = line.rstrip("\n")
+              tag, _, rest = line.partition(":")
+              if tag == "SF":
+                  f = files.setdefault(rest.removeprefix(ws),
+                      {"lines": {}, "fn": {}, "fnline": {}, "br": {}})
+              elif tag == "DA":
+                  n, c = rest.split(",")[:2]
+                  f["lines"][int(n)] = max(f["lines"].get(int(n), 0), int(c))
+              elif tag == "FN":
+                  n, name = rest.split(",", 1)
+                  f["fnline"][name] = int(n)
+              elif tag == "FNDA":
+                  c, name = rest.split(",", 1)
+                  f["fn"][name] = max(f["fn"].get(name, 0), int(c))
+              elif tag == "BRDA":
+                  n, b, k, c = rest.split(",")
+                  key = (int(n), b, k)
+                  f["br"][key] = max(f["br"].get(key, 0), 0 if c == "-" else int(c))
+          pct = lambda h, n: f"{100 * h / n:.1f}%" if n else "-"
+          out = ["## Fuzz reach", "", "| File | Lines | Branch outcomes | Functions |",
+                 "|:-----|------:|------:|------:|"]
+          T = [0] * 6
+          for name in sorted(files):
+              d = files[name]
+              l = [len(d["lines"]), sum(1 for c in d["lines"].values() if c)]
+              b = [len(d["br"]), sum(1 for c in d["br"].values() if c)]
+              fn = [len(d["fnline"]), sum(1 for k in d["fnline"] if d["fn"].get(k, 0))]
+              for i, v in enumerate(l + b + fn):
+                  T[i] += v
+              out.append(f"| `{name}` | {pct(l[1], l[0])} of {l[0]} | "
+                         f"{pct(b[1], b[0])} of {b[0]} | {fn[1]} of {fn[0]} |")
+          out.append(f"| **all** | {pct(T[1], T[0])} of {T[0]} | "
+                     f"{pct(T[3], T[2])} of {T[2]} | {T[5]} of {T[4]} |")
+          out += ["", "### Functions no input enters", "", "```"]
+          for name in sorted(files):
+              d = files[name]
+              for fn, n in sorted(d["fnline"].items(), key=lambda x: x[1]):
+                  if not d["fn"].get(fn, 0):
+                      out.append(f"{name}:{n} {fn}")
+          out += ["```", ""]
+          print("\n".join(out))
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a") as s:
+                  s.write("\n".join(out) + "\nThe one-sided conditions and the lines no "
+                          "input reaches are in the log and in `fuzz-reach.txt` in the "
+                          "`fuzz-reach` artifact.\n")
+          print("### One-sided conditions: an input ran the line, some outcome never")
+          for name in sorted(files):
+              d = files[name]
+              # One outcome taken is proof the condition ran; one never
+              # taken is the side no input tried.
+              taken, untaken = set(), set()
+              for (n, _, _), c in d["br"].items():
+                  (taken if c else untaken).add(n)
+              lines = sorted(taken & untaken)
+              if lines:
+                  print(f"{name}: {' '.join(map(str, lines))}")
+          print()
+          print("### Lines no input reaches")
+          for name in sorted(files):
+              miss = sorted(n for n, c in files[name]["lines"].items() if not c)
+              ran = {n for n, c in files[name]["lines"].items() if c}
+              ranges, a = [], None
+              for n in miss:
+                  # A range runs over lines with no code and ends at one that ran.
+                  if a is not None and not any(a[1] < r < n for r in ran):
+                      a[1] = n
+                  else:
+                      if a: ranges.append(a)
+                      a = [n, n]
+              if a: ranges.append(a)
+              if ranges:
+                  print(f"{name}: " + " ".join(str(x) if x == y else f"{x}-{y}" for x, y in ranges))
+          total = 100 * T[1] / T[0] if T[0] else 0
+          if total < floor:
+              print(f"::error::the corpus reaches {total:.1f}% of the lines in sources, "
+                    f"below the reach-floor of {floor:g}%")
+              sys.exit(1)
+          PY
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fuzz-reach
+          path: |
+            fuzz-reach.txt
+            fuzz-reach.lcov
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Save the corpus
         if: always() && inputs.cache-corpus
