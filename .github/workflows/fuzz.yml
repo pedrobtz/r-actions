@@ -828,7 +828,9 @@ jobs:
           EMBED_R: ${{ inputs.embed-r }}
           FLOOR: ${{ inputs.reach-floor }}
         run: |
-          set -eu
+          # pipefail: the report is piped into tee, and without it the floor's
+          # exit status is tee's, so a floor never fails.
+          set -euo pipefail
           r_cppflags=""; r_ldflags=""
           if [ "$EMBED_R" = true ]; then
             r_home=$(R RHOME)

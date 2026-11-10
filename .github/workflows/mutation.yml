@@ -86,10 +86,17 @@ on:
         required: false
         default: ""
       llvm:
-        description: The LLVM major version Mull is installed for.
+        description: >
+          The LLVM major version Mull is installed for. It must be one Mull
+          publishes an Ubuntu 24.04 package for (16 to 20 in 0.35.0).
         type: string
         required: false
         default: "18"
+      mull-version:
+        description: The Mull release to install, from its GitHub releases.
+        type: string
+        required: false
+        default: "0.35.0"
       mutant-timeout:
         description: Milliseconds a mutant's run may take before it counts as killed.
         type: number
@@ -316,22 +323,29 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Mull publishes Debian packages per LLVM version on Cloudsmith; the
-      # runner's clang has to be the same major version as the plugin.
+      # Mull's own GitHub release, one .deb per LLVM version. Its Cloudsmith
+      # apt repository answered "402 Payment Required" in November 2026, so
+      # the package is fetched directly, pinned. The runner's clang must be
+      # the plugin's LLVM major version.
       - name: Install clang and Mull
         env:
           LLVM: ${{ inputs.llvm }}
+          MULL: ${{ inputs.mull-version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -eu
+          set -euo pipefail
           sudo apt-get update -q
           sudo apt-get install -y -q "clang-${LLVM}" "llvm-${LLVM}"
-          curl -1sLf 'https://dl.cloudsmith.io/public/mull-project/mull-stable/setup.deb.sh' \
-            | sudo -E bash
-          sudo apt-get install -y -q "mull-${LLVM}"
-          plugin=$(ls /usr/lib/mull-ir-frontend-"${LLVM}"* | head -1)
-          [ -e "$plugin" ] || { echo "::error::no Mull plugin for LLVM ${LLVM}"; exit 1; }
+          asset=$(gh release view "$MULL" -R mull-project/mull --json assets \
+            -q ".assets[].name | select(test(\"^Mull-${LLVM}-${MULL}-LLVM-.*-ubuntu-amd64-24.04[.]deb$\"))" | head -1)
+          [ -n "$asset" ] || { echo "::error::Mull ${MULL} has no Ubuntu 24.04 package for LLVM ${LLVM}"; exit 1; }
+          gh release download "$MULL" -R mull-project/mull -p "$asset" -D "$RUNNER_TEMP"
+          sudo apt-get install -y -q "$RUNNER_TEMP/$asset"
+          plugin=$(ls /usr/lib/mull-ir-frontend-"${LLVM}"* 2>/dev/null | head -1 || true)
+          [ -n "$plugin" ] || { echo "::error::no Mull plugin for LLVM ${LLVM}"; dpkg -L "mull-${LLVM}" | head -30; exit 1; }
           echo "MULL_CC=clang-${LLVM} -fpass-plugin=${plugin} -O0 -g -grecord-command-line" >> "$GITHUB_ENV"
           echo "MULL_RUNNER=mull-runner-${LLVM}" >> "$GITHUB_ENV"
+          "mull-runner-${LLVM}" --version
 
       # The plugin reads its configuration at compile time, from the file
       # MULL_CONFIG names, so the filters are decided before the build.

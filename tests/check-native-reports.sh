@@ -53,7 +53,7 @@ if [ "$part" = all ] || [ "$part" = mutation ]; then
   d="$work/mut"; mkdir -p "$d/src"
   cp "$fx/lib.c" "$d/src/"; cp "$fx/test.c" "$d/"
   envf="$d/env"; : > "$envf"
-  ( cd "$d" && GITHUB_ENV="$envf" LLVM=18 bash "$work/mut-install.sh" )
+  ( cd "$d" && GITHUB_ENV="$envf" RUNNER_TEMP="$d" LLVM=18 MULL=0.35.0 bash "$work/mut-install.sh" )
   while IFS= read -r kv; do [ -n "$kv" ] && export "${kv%%=*}=${kv#*=}"; done < "$envf"
   ( cd "$d" && GITHUB_ENV="$envf" RUNNER_TEMP="$d" INCLUDE="" EXCLUDE=".*/test\.c" TIMEOUT=10000 \
       MUTATORS=$'cxx_gt_to_ge\ncxx_gt_to_le' \
