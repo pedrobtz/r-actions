@@ -121,6 +121,27 @@ on:
         type: string
         required: false
         default: ""
+      ignore-crash-pattern:
+        description: >
+          Extended regular expression marking a crash that is not the
+          package's. A run that dies on a signal and whose output matches it
+          is listed under its own heading and does not fail the job; every
+          other crash still does.
+
+          The interpreter has allocation paths that crash on a failed
+          allocation themselves. R's TRE regex compiler and gzfile()
+          segfault in base R, under grepl(), sub(), strsplit(), and so do
+          the byte compiler's regex calls. A sweep over any R workload hits
+          them, and a job red for R's reasons teaches everyone to ignore it.
+          Match on the crash's top R frame, so a crash under `.Call()` into
+          the package never matches:
+
+              ignore-crash-pattern: "^ 1: (grepl?|sub|gsub|strsplit|gzfile)\\("
+
+          Empty by default: every crash fails.
+        type: string
+        required: false
+        default: ""
       min-target-hits:
         description: >
           Fail unless at least this many swept runs matched target-pattern.
@@ -577,12 +598,14 @@ jobs:
           RUN_COMMAND: ${{ inputs.run }}
           EXPECT: ${{ inputs.expect-pattern }}
           TARGET: ${{ inputs.target-pattern }}
+          IGNORE: ${{ inputs.ignore-crash-pattern }}
           MIN_HITS: ${{ inputs.min-target-hits }}
           START: ${{ steps.range.outputs.start }}
           END: ${{ steps.range.outputs.end }}
         run: |
           set -eu
           : > crashes.txt
+          : > foreign.txt
           : > silent.txt
           checked=0
           hits=0
@@ -600,7 +623,13 @@ jobs:
               hits=$((hits + 1))
             fi
 
-            if [ "$status" -ge 128 ]; then
+            if [ "$status" -ge 128 ] && [ -n "$IGNORE" ] && grep -qE -- "$IGNORE" "out.${n}"; then
+              echo "N=${n} died on signal $((status - 128)), outside the package"
+              {
+                echo "### allocation ${n}: signal $((status - 128))"
+                sed -n '1,20p' "out.${n}"
+              } >> foreign.txt
+            elif [ "$status" -ge 128 ]; then
               echo "N=${n} died on signal $((status - 128))"
               {
                 echo "### allocation ${n}: signal $((status - 128))"
@@ -621,9 +650,11 @@ jobs:
 
           crashes=$(grep -c '^### ' crashes.txt || true)
           silent=$(grep -c '^### ' silent.txt || true)
+          foreign=$(grep -c '^### ' foreign.txt || true)
           echo "checked=${checked}" >> "$GITHUB_OUTPUT"
           echo "crashes=${crashes}" >> "$GITHUB_OUTPUT"
           echo "silent=${silent}"   >> "$GITHUB_OUTPUT"
+          echo "foreign=${foreign}" >> "$GITHUB_OUTPUT"
           echo "hits=${hits}"       >> "$GITHUB_OUTPUT"
 
           {
@@ -635,6 +666,7 @@ jobs:
             echo "| allocations in the workload | ${{ steps.range.outputs.total }} |"
             echo "| failures injected | ${checked} |"
             echo "| **died on a signal** | ${crashes} |"
+            [ -z "$IGNORE" ] || echo "| died on a signal outside the package (/${IGNORE}/) | ${foreign} |"
             [ -z "$EXPECT" ] || echo "| errored without matching the pattern | ${silent} |"
             [ -z "$TARGET" ] || echo "| **reached the target** (/${TARGET}/) | ${hits} |"
             echo
@@ -646,6 +678,13 @@ jobs:
             if [ "$silent" -gt 0 ]; then
               echo '```'
               cat silent.txt
+              echo '```'
+            fi
+            if [ "$foreign" -gt 0 ]; then
+              echo "#### Crashes outside the package"
+              echo
+              echo '```'
+              head -200 foreign.txt
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
@@ -673,6 +712,7 @@ jobs:
           name: alloc-failure
           path: |
             crashes.txt
+            foreign.txt
             silent.txt
             failmalloc.c
           if-no-files-found: ignore
