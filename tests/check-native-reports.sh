@@ -57,9 +57,11 @@ if [ "$part" = all ] || [ "$part" = mutation ]; then
   while IFS= read -r kv; do [ -n "$kv" ] && export "${kv%%=*}=${kv#*=}"; done < "$envf"
   ( cd "$d" && GITHUB_ENV="$envf" RUNNER_TEMP="$d" INCLUDE="" EXCLUDE=".*/test\.c" TIMEOUT=10000 \
       MUTATORS=$'cxx_gt_to_ge\ncxx_gt_to_le' \
-      BUILD='$MULL_CC -c src/lib.c -o lib.o && $MULL_CC -c test.c -o test.o && $MULL_CC lib.o test.o -o mtest' bash "$work/mut-configure.sh" )
+      BUILD='$MULL_CC -c src/lib.c -o lib.o && $MULL_CC -c test.c -o test.o && $MULL_CC lib.o test.o -o mtest' bash -x "$work/mut-configure.sh" ) \
+    || { echo "FAIL mutation: the build failed"; exit 1; }
   while IFS= read -r kv; do [ -n "$kv" ] && export "${kv%%=*}=${kv#*=}"; done < "$envf"
-  ( cd "$d" && RUNNER_TEMP="$d" TESTS=mtest bash "$work/mut-run.sh" > "$d/run.log" 2>&1 )
+  ( cd "$d" && RUNNER_TEMP="$d" TESTS=mtest bash -x "$work/mut-run.sh" > "$d/run.log" 2>&1 ) \
+    || { echo "FAIL mutation: the run step failed"; cat "$d/run.log"; exit 1; }
   ( cd "$d" && GITHUB_WORKSPACE="$d" GITHUB_STEP_SUMMARY="$d/summary.md" bash "$work/mut-report.sh" > /dev/null )
   want "$d/survivors.txt" '^src/lib.c:4:' "mutation: a mutant of the untested \`> 100\` branch survives"
   want "$d/killed.txt" '^src/lib.c:6:' "mutation: a mutant of the tested \`> 0\` comparison is killed"
