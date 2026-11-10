@@ -1243,6 +1243,24 @@ at `.github-packages/<repo>`, for headers that come from a package not on CRAN
       github-packages: pedrobtz/zufast
       cflags: -g -O1 -fno-omit-frame-pointer -Iinst/include -I.github-packages/zufast/inst/include
 ```
+
+#### Fuzz reach
+
+A green run proves no input crashed. It cannot say which code no input ever
+entered. After a green run, the job therefore builds the same sources for
+coverage, replays the corpus once, and reports on `sources` alone:
+
+- a per-file table of lines, branch outcomes and functions reached;
+- the functions no input enters;
+- the conditions inputs only ever take one way;
+- the lines no input reaches.
+
+The table and the function list go to the job summary. All four go to the
+log and to the `fuzz-reach` artifact. `reach-floor` fails the run when the
+corpus reaches less than that percentage of the lines; it is 0, report only,
+by default. Set it a little under the figure you see, so that a harness
+change which stops reaching code goes red.
+
 ### `alloc-failure.yml` — does the OOM path work?
 
 Allocation failure is the least-tested path in any C library, because nothing
@@ -1515,6 +1533,67 @@ repo-relative (`src/cyaml*.c`) even though R compiles from inside `src/` and
 the compiler says `cyaml.c`; the job puts the path back before matching.
 Excluded findings are still shown in the summary, under their own heading,
 rather than dropped.
+
+### `mutation.yml` — which changes does no test notice?
+
+Coverage says a line ran, not that anything checked what it did. In
+zuhttp's November 2026 reviews, 14 of the 16 bugs were in code the suite
+already ran. Mutation testing measures that gap. [Mull](https://github.com/mull-project/mull)
+changes the C one operator at a time (`<` to `<=`, a condition negated, a
+call removed), reruns the tests, and the job lists each mutant no test
+kills.
+
+The caller builds its C tests with `$MULL_CC` and names the binaries:
+
+```yaml
+jobs:
+  mutation:
+    uses: pedrobtz/r-actions/.github/workflows/mutation.yml@v1
+    with:
+      build: make -C ctest zuh_ctest CC="$MULL_CC"   # one -c per file
+      tests: ctest/zuh_ctest
+```
+
+Compile each source file in a command of its own (`-c`) and link separately,
+as make does: Mull re-parses every file from its recorded command line. A
+test kills a mutant by exiting non-zero. `include` and `exclude` are
+regular expressions over source paths; the default excludes `vendor/` and
+test directories. `mutators` picks Mull's mutators, and the default is Mull's
+own set. The summary has a per-file table of killed and surviving mutants
+and the first 200 survivors; the `mutation` artifact has them all.
+
+It is slow, so call it on a schedule or by dispatch. It is reported, never
+gated. Some survivors are equivalent mutants that change nothing observable,
+and an allocation-failure branch survives unless the tests inject failures.
+Read the list for statements nothing checks.
+
+### `assurance.yml` — does the package do what its assurance file says?
+
+The portfolio standard, `pedrobtz/packages:claude/shared/assurance.md`,
+says what a package must check by the kinds of package it is: `compiled`,
+`untrusted-input`, `spec`, `lifecycle`, `emits`. Each package records how
+it meets that in `.agents/assurance.md`, from that repository's
+`templates/assurance.md`. This job holds the file to it, and fails on:
+
+- a kind the standard does not know;
+- a required check with no row;
+- a `done` that no workflow under `.github/workflows/` backs: the row's
+  workflow must call the r-actions workflow of that name, or say `(own)`;
+- a required table that is missing or empty;
+- a Boundaries row without an oracle, or with "no crash" as its oracle;
+- an empty cell, or a `gap` or `n/a` with no issue or reason.
+
+A tracked gap, `gap #<issue>`, passes. The file exists to say what is not
+covered yet.
+
+```yaml
+jobs:
+  assurance:
+    uses: pedrobtz/r-actions/.github/workflows/assurance.yml@v1
+```
+
+It takes seconds, and it is not gated: the file it checks is Markdown under
+a dot directory, which the gate counts as documentation.
 
 ## Usage
 

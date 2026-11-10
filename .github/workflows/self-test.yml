@@ -78,6 +78,37 @@ jobs:
       - name: Build it from the workflow and run programs under it
         run: bash tests/check-alloc-interposer.sh
 
+  assurance:
+    name: assurance check holds a package to its file
+    # A checker that passes a claim nothing backs is worse than none: the
+    # file then says a package is covered where it is not.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the check through its cases
+        run: |
+          python3 -m venv /tmp/assurance
+          /tmp/assurance/bin/pip install --quiet pyyaml
+          PATH="/tmp/assurance/bin:$PATH" bash tests/check-assurance.sh
+
+  native-reports:
+    name: fuzz reach and mutation report a fixture's known gaps
+    # Both reports exit 0 when wrong -- a reach table with no files, a
+    # mutation summary of no mutants -- so only a fixture with a known
+    # answer notices. This also proves Mull installs and runs on the image.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install clang and llvm
+        run: sudo apt-get update -q && sudo apt-get install -y -q clang llvm
+      - name: Run both reports on the fixture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -m venv /tmp/native
+          /tmp/native/bin/pip install --quiet pyyaml
+          PATH="/tmp/native/bin:$PATH" bash tests/check-native-reports.sh
+
   major-tag:
     name: v1 tracks the newest release
     # Tags do not move on a pull request, so this would only ever report the

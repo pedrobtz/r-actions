@@ -1,0 +1,176 @@
+# Checks a package's `.agents/assurance.md` against the portfolio standard.
+#
+# The standard is pedrobtz/packages:claude/shared/assurance.md: what a
+# package must check, by the kinds of package it declares. The package says
+# how it meets that in `.agents/assurance.md`, from
+# pedrobtz/packages:templates/assurance.md. This job holds the file to it:
+#
+#   * every kind is one the standard knows;
+#   * every check the kinds require has a row, marked `done`, `gap #N` or
+#     `n/a: reason`;
+#   * a `done` names a workflow under .github/workflows/ that calls the
+#     r-actions workflow of that name, or says `(own)`;
+#   * the tables the kinds require are there and not empty;
+#   * every Boundaries row names an oracle, and "no crash" is not one;
+#   * every cell is a fact, a `gap #N` or an `n/a: reason`, never blank.
+#
+# A tracked gap passes. The file is meant to say what is not covered yet,
+# and an issue that says so is the point. What fails is a claim nothing
+# backs, or a gap nobody filed.
+#
+# The check is the Python in the one step below. pedrobtz/packages' weekly
+# audit takes it from this file and runs it against every package, so the
+# portfolio view and each package's CI cannot disagree.
+on:
+  workflow_call:
+    inputs:
+      file:
+        description: The assurance file, relative to the repository root.
+        type: string
+        required: false
+        default: .agents/assurance.md
+
+name: assurance
+
+permissions:
+  contents: read
+
+jobs:
+  assurance:
+    name: assurance file
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the assurance file
+        id: check
+        env:
+          ASSURANCE_FILE: ${{ inputs.file }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, sys
+
+          # The standard's kinds, and the checks each requires, in the order
+          # the standard lists them. A change to the standard changes these.
+          REQUIRED = {
+              "compiled": ["sanitizers", "valgrind", "rchk", "gctorture",
+                           "analyzers", "alloc-failure", "mutation"],
+              "untrusted-input": ["fuzz", "fuzz-reach"],
+              "spec": [],
+              "lifecycle": [],
+              "emits": [],
+          }
+          # The r-actions workflow a `done` row must call. fuzz-reach is a
+          # step of fuzz.yml.
+          WORKFLOW = {c: f"{c}.yml" for k in REQUIRED.values() for c in k}
+          WORKFLOW["fuzz-reach"] = "fuzz.yml"
+          TABLES = {
+              "Boundaries": {"untrusted-input", "spec", "emits"},
+              "Objects": {"lifecycle"},
+          }
+
+          path = pathlib.Path(os.environ.get("ASSURANCE_FILE") or ".agents/assurance.md")
+          wfdir = pathlib.Path(".github/workflows")
+          errors = []
+
+          def err(msg):
+              errors.append(msg)
+
+          if not path.is_file():
+              print(f"::error::{path} does not exist. Copy "
+                    "pedrobtz/packages templates/assurance.md and fill it in.")
+              sys.exit(1)
+
+          # Sections by `## ` heading. A table's first row is its header and
+          # its second the separator; the rest are cells.
+          sections, tables, current = {}, {}, None
+          for line in path.read_text().splitlines():
+              m = re.match(r"^## +(.+?)\s*$", line)
+              if m:
+                  current = m.group(1)
+                  sections[current] = []
+                  tables[current] = []
+                  continue
+              if current is None:
+                  continue
+              sections[current].append(line)
+              if line.lstrip().startswith("|"):
+                  cells = [c.strip() for c in line.strip().strip("|").split("|")]
+                  if all(re.fullmatch(r":?-+:?", c) for c in cells):
+                      continue
+                  tables[current].append(cells)
+          rows = {k: v[1:] for k, v in tables.items()}   # drop the header
+
+          GAP = re.compile(r"^gap #\d+\b")
+          NA = re.compile(r"^n/a: *\S")
+
+          def cell_ok(where, text):
+              if not text:
+                  err(f"{where}: empty; write the fact, `gap #<issue>` or `n/a: <reason>`")
+              elif text.startswith("gap") and not GAP.match(text):
+                  err(f"{where}: `{text}` is a gap without an issue; write `gap #<issue>`")
+              elif text.startswith("n/a") and not NA.match(text):
+                  err(f"{where}: `{text}` needs a reason, `n/a: <reason>`")
+
+          # Kinds.
+          kinds = re.findall(r"`([^`]+)`", "\n".join(sections.get("Kinds", [])))
+          if not kinds:
+              err("## Kinds: none declared")
+          for k in kinds:
+              if k not in REQUIRED:
+                  err(f"## Kinds: `{k}` is not a kind the standard knows "
+                      f"({', '.join(REQUIRED)})")
+          kinds = [k for k in kinds if k in REQUIRED]
+
+          # Required checks.
+          checks = {}
+          for r in rows.get("Required checks", []):
+              r = (r + ["", "", ""])[:3]
+              checks[r[0]] = r
+          for k in kinds:
+              for c in REQUIRED[k]:
+                  if c not in checks:
+                      err(f"## Required checks: no row for `{c}`, which `{k}` requires")
+          for c, (_, status, where) in checks.items():
+              label = f"## Required checks: `{c}`"
+              if status == "done":
+                  name = where.split()[0] if where.split() else ""
+                  wf = wfdir / name
+                  if not name or not wf.is_file():
+                      err(f"{label}: `done`, but `{where}` is not a file under {wfdir}/")
+                  elif "(own)" not in where and c in WORKFLOW:
+                      want = f"pedrobtz/r-actions/.github/workflows/{WORKFLOW[c]}@"
+                      if want not in wf.read_text():
+                          err(f"{label}: `done`, but {wf} does not call "
+                              f"{WORKFLOW[c]}; call it, or mark the row `(own)`")
+              else:
+                  cell_ok(f"{label} status", status)
+                  if status and not (GAP.match(status) or NA.match(status)):
+                      err(f"{label}: status `{status}` is not `done`, "
+                          "`gap #<issue>` or `n/a: <reason>`")
+
+          # The tables the kinds require, and every row of every table.
+          for table, need in TABLES.items():
+              if need & set(kinds) and not rows.get(table):
+                  err(f"## {table}: required by "
+                      f"`{'`, `'.join(sorted(need & set(kinds)))}`, and empty")
+          for table in ("Boundaries", "Objects", "Limits"):
+              header = (tables.get(table) or [[]])[0]
+              for i, r in enumerate(rows.get(table, []), 1):
+                  r = r + [""] * (len(header) - len(r))
+                  for col, text in zip(header, r):
+                      cell_ok(f"## {table} row {i} ({r[0] or '?'}), {col}", text)
+                  if table == "Boundaries" and len(r) > 1:
+                      if re.search(r"no crash|^none$|^-$|^(line |branch )?coverage", r[1], re.I):
+                          err(f"## Boundaries row {i} ({r[0]}): `{r[1]}` is "
+                              "not an oracle; it must know the answer")
+
+          for e in errors:
+              print(f"::error file={path}::{e}")
+          print(f"{path}: kinds {' '.join(kinds) or '(none)'}; "
+                f"{len(checks)} required-check rows, "
+                f"{sum(1 for r in checks.values() if GAP.match(r[1]))} tracked gaps; "
+                f"{len(errors)} problems")
+          sys.exit(1 if errors else 0)
+          PY
