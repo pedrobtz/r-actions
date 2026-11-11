@@ -1,7 +1,18 @@
 # r-actions v2: CI as a shared budget
 
-**Status:** proposal, 2026-11-11. Nothing here is built yet. v1 stays as it
-is until v2 is released; callers move by changing `@v1` to `@v2`.
+**Status:** accepted, 2026-11-11. Step 1 is built in v1 (v1.39.0, #108),
+and the portfolio's 72 packages were moved to it the same day:
+
+- no checks on push to main (3.4);
+- scheduled runs skip an unchanged commit, except in the first week of a
+  month and for `fuzz.yml` (3.5);
+- each package has its own schedule slot (3.5);
+- sweeps across many packages use `[skip ci]`.
+
+Step 2 is tracked in #101: tiers (#102), generated callers (#103), the
+daily `smoke` on main (#104), the budget report (#105), download retries
+(#106), and the pilot (#107). v1 stays as it is until v2 is released;
+callers move by changing `@v1` to `@v2`.
 
 ## 1. Why
 
@@ -314,16 +325,19 @@ The `report.yml` budget section (3.7) is how v2 gets measured once it runs.
    `full` tier runs them, which it does. Rows stay `done`; the only change is
    when they run.
 
-## 7. Open questions
+## 7. Decisions
 
-1. Should `smoke` include the `clang23` container? It is the most CRAN-like
-   check, but it installs Suggests from source on R-devel, which takes minutes
-   for some packages. The alternative is to keep it out of `smoke` and run it
-   daily (3.5).
-2. Should coverage stay on pull requests for packages whose `assurance.md`
-   sets a coverage floor? The floor is checked weekly if it moves to `full`.
-3. The daily `smoke` on main: is a day an acceptable delay for the two-merge
-   conflict, or should it run on every merge when the package had two merges
-   within an hour?
-4. The stagger window: Saturday 00:00 to Monday 06:00 UTC assumes the
-   maintainer works weekdays. Is that right?
+The questions this section left open, answered by the maintainer on
+2026-11-11:
+
+1. **`clang23` is in `smoke`.** It is the one check before a merge that sees
+   what CRAN's pretest rejects. A package whose Suggests are too slow to
+   build there uses `pre-install`.
+2. **Coverage leaves pull requests** and runs weekly in `full`. A coverage
+   floor moves slowly.
+3. **A day is an acceptable delay** for two merges that conflict in meaning.
+   The daily `smoke` on main (#104) runs at most once a day.
+4. **The schedule window is Saturday 00:00 to Monday 06:00 UTC,** so a
+   weekend's failures are waiting at the start of the week.
+
+GitHub Pro waits for the budget report (#105).
