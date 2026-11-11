@@ -25,14 +25,15 @@ chmod +x "$work/bin/gh"
 
 failed=0
 # case <name> <expected outputs> <event> <labels JSON> <workflow> <profile>
-#      <files> [workflow_ref] [file rules]
+#      <files> [workflow_ref] [file rules] [skip-r-only]
 case_() {
   local name=$1 want=$2 out
   out=$(mktemp -p "$work")
   env PATH="$work/bin:$PATH" GITHUB_OUTPUT="$out" GITHUB_STEP_SUMMARY=/dev/null \
     REPO=o/r EVENT="$3" LABELS="$4" R_ACTIONS_WORKFLOW="$5" R_ACTIONS_PROFILE="$6" \
     FILES="$7" WORKFLOW_REF="${8:-o/r/.github/workflows/native-checks.yaml@refs/pull/1/merge}" \
-    FILE_RULES="${9:-true}" PR_BASE=a PR_HEAD=b BEFORE=c AFTER=d FORCED=false \
+    FILE_RULES="${9:-true}" R_ACTIONS_SKIP_R_ONLY="${10:-}" \
+    PR_BASE=a PR_HEAD=b BEFORE=c AFTER=d FORCED=false \
     bash "$work/gate.sh" >/dev/null 2>&1
   local got; got=$(tr '\n' ' ' <"$out" | sed 's/ $//')
   if [ "$got" = "$want" ]; then echo "ok   $name"
@@ -61,5 +62,24 @@ case_ ".Rbuildignore is code"               "docs-only=false scope=code profile=
 case_ "DESCRIPTION + CRAN-SUBMISSION: meta" "docs-only=true scope=metadata profile=full" pull_request '[]' fuzz "" "DESCRIPTION CRAN-SUBMISSION"
 case_ "file rules off: docs change runs"    "docs-only=false scope=code profile=full"  pull_request '[]' fuzz "" "README.md" "" false
 case_ "file rules off: a label still skips" "docs-only=true scope=docs profile=full"   pull_request '["skip-ci:fuzz"]' fuzz "" "$C" "" false
+
+# An R-only change: nothing outside R/, man/, vignettes/ and tests/testthat,
+# beside documentation and metadata. Only a workflow that says it reads no R
+# (skip-r-only) skips it; everything else still sees `code`.
+RO="R/x.R tests/testthat/test-x.R tests/testthat.R man/x.Rd vignettes/x.Rmd"
+case_ "r-only, opted in: skipped"           "docs-only=true scope=r-only profile=full"  pull_request '[]' fuzz "" "$RO" "" true true
+case_ "r-only, not opted in: code"          "docs-only=false scope=code profile=full"   pull_request '[]' fuzz "" "$RO"
+case_ "r-only, opted in as false: code"     "docs-only=false scope=code profile=full"   pull_request '[]' fuzz "" "$RO" "" true false
+case_ "r-only with docs and metadata"       "docs-only=true scope=r-only profile=quick" pull_request '[]' fuzz auto "$R NEWS.md DESCRIPTION" "" true true
+case_ "r-only on a push"                    "docs-only=true scope=r-only profile=full"  push null fuzz "" "$R" "" true true
+case_ "R and C together: code"              "docs-only=false scope=code profile=full"   pull_request '[]' fuzz "" "$R $C" "" true true
+case_ "tests/ outside testthat is code"     "docs-only=false scope=code profile=full"   pull_request '[]' fuzz "" "$R tests/ctest.c" "" true true
+case_ "inst/, tools/, fuzz/ are code"       "docs-only=false scope=code profile=full"   pull_request '[]' fuzz "" "$R inst/x tools/y fuzz/z" "" true true
+case_ "configure and Makevars are code"     "docs-only=false scope=code profile=full"   pull_request '[]' fuzz "" "$R configure" "" true true
+case_ "full-ci: an r-only change runs"      "docs-only=false scope=code profile=full"   pull_request '["full-ci"]' fuzz auto "$R" "" true true
+case_ "docs only stays docs when opted in"  "docs-only=true scope=docs profile=full"    pull_request '[]' fuzz "" "README.md" "" true true
+case_ "metadata stays metadata when opted in" "docs-only=true scope=metadata profile=full" pull_request '[]' fuzz "" "DESCRIPTION" "" true true
+case_ "file rules off: r-only runs"         "docs-only=false scope=code profile=full"   pull_request '[]' fuzz "" "$R" "" false true
+case_ "a rename out of R/ is code"          "docs-only=false scope=code profile=full"   pull_request '[]' fuzz "" "R/x.R src/x.c" "" true true
 
 exit "$failed"
