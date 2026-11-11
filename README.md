@@ -1656,6 +1656,31 @@ jobs:
 It takes seconds, and it is not gated: the file it checks is Markdown under
 a dot directory, which the gate counts as documentation.
 
+A second step holds the package's own workflows to `ci.md`'s gating rule.
+A job that a pull request starts must do one of these:
+
+- call an r-actions workflow, which gates itself;
+- `needs: changes` and start its `if:` with
+  `${{ !cancelled() && needs.changes.outputs.docs-only != 'true'`;
+- admit only other events in its `if:`, as a schedule-only soak does;
+- say why it runs anyway, with `# ungated: <reason>` on the line above its
+  key.
+
+`pkgdown` and `coverage` workflows are exempt, since a documentation change
+still runs them, and so is a workflow whose `pull_request` trigger lists
+`paths`. A `paths-ignore` list is a finding. With `ungated-jobs: warn`, the
+default for now, each finding is an annotation and a line in the job
+summary; `ungated-jobs: fail` fails the job. The default becomes `fail` once
+the portfolio is clean.
+
+```yaml
+jobs:
+  assurance:
+    uses: pedrobtz/r-actions/.github/workflows/assurance.yml@v1
+    with:
+      ungated-jobs: fail
+```
+
 ## Usage
 
 ### `cran-release.yml` — tag what was submitted to CRAN

@@ -14,6 +14,16 @@
 #   * every Boundaries row names an oracle, and "no crash" is not one;
 #   * every cell is a fact, a `gap #N` or an `n/a: reason`, never blank.
 #
+# A second step holds the package's own workflows to ci.md's gating rule:
+# every job a pull request starts either calls an r-actions workflow (which
+# gates itself), or is wired to the `changes` gate and skips a
+# documentation-only change, or says why not with `# ungated: <reason>` on
+# the line above its key. pkgdown and coverage are exempt, as ci.md says a
+# documentation change still runs them, and so are jobs whose `if:` admits
+# only events other than pull_request. `paths-ignore` is a finding: ci.md
+# gates through changes.yml. `ungated-jobs: warn` (the default, for now)
+# annotates and summarises; `fail` fails the job.
+#
 # A tracked gap passes. The file is meant to say what is not covered yet,
 # and an issue that says so is the point. What fails is a claim nothing
 # backs, or a gap nobody filed.
@@ -29,6 +39,13 @@ on:
         type: string
         required: false
         default: .agents/assurance.md
+      ungated-jobs:
+        description: >
+          `warn` annotates jobs that run on a documentation-only pull request
+          without saying why; `fail` fails on them.
+        type: string
+        required: false
+        default: warn
 
 name: assurance
 
@@ -173,4 +190,86 @@ jobs:
                 f"{sum(1 for r in checks.values() if GAP.match(r[1]))} tracked gaps; "
                 f"{len(errors)} problems")
           sys.exit(1 if errors else 0)
+          PY
+
+      - name: Check the package's own workflows are gated (ci.md)
+        id: gating
+        if: ${{ !cancelled() }}
+        env:
+          UNGATED_JOBS: ${{ inputs.ungated-jobs }}
+        run: |
+          python3 -m venv /tmp/gating >/dev/null
+          /tmp/gating/bin/pip install --quiet pyyaml
+          /tmp/gating/bin/python - <<'PY'
+          import os, pathlib, re, sys
+          import yaml
+
+          mode = os.environ.get("UNGATED_JOBS") or "warn"
+          if mode not in ("warn", "fail"):
+              print(f"::error::ungated-jobs must be warn or fail, not {mode!r}")
+              sys.exit(1)
+          GATE = "needs.changes.outputs.docs-only != 'true'"
+          # ci.md: a documentation-only change still runs coverage and pkgdown.
+          EXEMPT = {"pkgdown", "coverage"}
+          findings = []
+
+          for wf in sorted(pathlib.Path(".github/workflows").glob("*.y*ml")):
+              if wf.stem in EXEMPT:
+                  continue
+              text = wf.read_text()
+              try:
+                  doc = yaml.safe_load(text) or {}
+              except yaml.YAMLError as e:
+                  findings.append((wf, None, f"does not parse: {e}"))
+                  continue
+              on = doc.get("on", doc.get(True)) or {}   # YAML reads `on` as True
+              if isinstance(on, str):
+                  on = {on: None}
+              elif isinstance(on, list):
+                  on = {k: None for k in on}
+              if "pull_request" not in on:
+                  continue
+              pr = on.get("pull_request") or {}
+              if isinstance(pr, dict) and "paths-ignore" in pr:
+                  findings.append((wf, None, "gates with `paths-ignore`; call "
+                                   "changes.yml and test its `docs-only` output (ci.md)"))
+                  continue
+              if isinstance(pr, dict) and "paths" in pr:
+                  continue          # runs only when the files it names change
+              lines = text.splitlines()
+              for job, body in (doc.get("jobs") or {}).items():
+                  if not isinstance(body, dict):
+                      continue
+                  if "pedrobtz/r-actions/.github/workflows/" in str(body.get("uses", "")):
+                      continue      # gated inside, and changes.yml is the gate
+                  cond = str(body.get("if", ""))
+                  if "github.event_name" in cond and "pull_request" not in cond:
+                      continue      # never runs on a pull request
+                  needs = body.get("needs")
+                  needs = [needs] if isinstance(needs, str) else (needs or [])
+                  if "changes" in needs and GATE in cond:
+                      continue
+                  at = next((i for i, l in enumerate(lines)
+                             if re.match(rf"^  {re.escape(str(job))}:\s*(#.*)?$", l)), None)
+                  near = " ".join(lines[max(0, at - 1):at + 1]) if at is not None else ""
+                  if re.search(r"#\s*ungated:\s*\S", near):
+                      continue
+                  findings.append((wf, at, f"job `{job}` runs on a documentation-only "
+                                   "pull request: give it `needs: changes` and `if: "
+                                   "$" "{{ !cancelled() && needs.changes.outputs.docs-only "
+                                   "!= 'true' }}`, or say why with `# ungated: <reason>` "
+                                   "above it (ci.md)"))
+
+          level = "error" if mode == "fail" else "warning"
+          for wf, at, msg in findings:
+              line = f",line={at + 1}" if at is not None else ""
+              print(f"::{level} file={wf}{line}::{msg}")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary and findings:
+              with open(summary, "a") as f:
+                  f.write(f"### Ungated jobs ({len(findings)}, {mode})\n\n")
+                  for wf, at, msg in findings:
+                      f.write(f"- `{wf.name}`: {msg}\n")
+          print(f"{len(findings)} ungated jobs ({mode})")
+          sys.exit(1 if findings and mode == "fail" else 0)
           PY

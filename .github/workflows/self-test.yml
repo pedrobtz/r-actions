@@ -105,6 +105,19 @@ jobs:
           /tmp/assurance/bin/pip install --quiet pyyaml
           PATH="/tmp/assurance/bin:$PATH" bash tests/check-assurance.sh
 
+  gating:
+    name: gating check flags ungated package jobs
+    # zuhttp ran eight real jobs on a pull request that changed one
+    # Markdown file, and nothing said so: the check must catch that.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the step through its cases
+        run: |
+          python3 -m venv /tmp/gating-test
+          /tmp/gating-test/bin/pip install --quiet pyyaml
+          PATH="/tmp/gating-test/bin:$PATH" bash tests/check-gating.sh
+
   native-reports:
     name: fuzz reach and mutation report a fixture's known gaps
     # Both reports exit 0 when wrong -- a reach table with no files, a
