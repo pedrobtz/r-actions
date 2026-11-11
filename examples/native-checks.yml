@@ -1,6 +1,8 @@
 on:
-  push:
-    branches: [main, master]
+  # No `push:`. A pull request already checks its merge with main, so the
+  # push after merge would check the same tree again, in every package at
+  # once. Main is checked by the schedule below, which skips a commit it has
+  # already checked (README, "Pushes to main").
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
   # The full set runs weekly and on demand:

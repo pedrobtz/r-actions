@@ -185,9 +185,14 @@ jobs:
   # nothing but git and a heredoc.
   badge:
     needs: coverage
-    # Branch pushes only. On a tag push GITHUB_REF_NAME is the tag, and the
+    # Branch pushes, and a scheduled or dispatched run on the default branch:
+    # callers measure main weekly rather than on every push to it (README,
+    # "Pushes to main"). On a tag push GITHUB_REF_NAME is the tag, and the
     # commit pushed back to it is rejected -- five times, then the job fails.
-    if: github.event_name == 'push' && github.ref_type == 'branch'
+    if: >-
+      (github.event_name == 'push' && github.ref_type == 'branch')
+      || ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        && github.ref_name == github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 10
 

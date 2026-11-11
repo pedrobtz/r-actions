@@ -162,6 +162,8 @@ jobs:
           FILE_RULES: ${{ inputs.skip-docs-only }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           WORKFLOW_REF: ${{ github.workflow_ref }}
+          BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
           # R_ACTIONS_WORKFLOW (the name in `skip-ci:<name>`) and
           # R_ACTIONS_PROFILE (the `profile` input, where there is one) come
           # from the workflow-level `env`, so that this job stays identical
@@ -172,7 +174,8 @@ jobs:
           # every job runs -- unless a label on the pull request says
           # otherwise.
           #
-          # `scope` is `docs`, `metadata`, `r-only` or `code`. `docs-only` is
+          # `scope` is `docs`, `metadata`, `r-only`, `unchanged` (a scheduled
+          # run on an already checked commit) or `code`. `docs-only` is
           # true for all but `code`: every job gated on it skips them.
           # r-cmd-check alone reads `scope`, and runs its quick runner legs
           # for `metadata`, so a DESCRIPTION edit still gets one R CMD check.
@@ -232,6 +235,40 @@ jobs:
           if [ "$FILE_RULES" != true ]; then
             echo "skip-docs-only is false, so the changed files are not consulted."
             exit 0
+          fi
+
+          # A scheduled run on the commit that the same workflow's last
+          # successful scheduled run already checked has nothing new to find.
+          # Most packages are idle in any given week, and their full sets
+          # queued behind the active ones. What sits under the commit does
+          # move -- the containers, R-devel, CRAN's dependencies -- so a
+          # scheduled run in the first seven days of a month runs whatever
+          # the commit. The runs API needs `actions: read`, which a caller's
+          # token need not carry; a public repository answers anonymously.
+          # Anything short of a clear answer runs. Fuzzing is exempt: a
+          # campaign on the same commit still explores new inputs, and its
+          # corpus carries over from one scheduled run to the next.
+          if [ "$EVENT" = schedule ] && [ "${R_ACTIONS_WORKFLOW:-}" != fuzz ]; then
+            day=$(date -u +%d)
+            wf=""
+            case "$WORKFLOW_REF" in
+              "$REPO"/.github/workflows/*@*)
+                wf=${WORKFLOW_REF#"$REPO"/.github/workflows/}; wf=${wf%%@*} ;;
+            esac
+            last=""
+            if [ "${day#0}" -gt 7 ] && [ -n "$wf" ] && [ -n "${HEAD_SHA:-}" ]; then
+              q="repos/$REPO/actions/workflows/$wf/runs?event=schedule&status=success&branch=${BRANCH}&per_page=1"
+              last=$(gh api "$q" --jq '.workflow_runs[0].head_sha // empty' 2>/dev/null) ||
+                last=$(curl -fsS "https://api.github.com/$q" 2>/dev/null |
+                         jq -r '.workflow_runs[0].head_sha // empty' 2>/dev/null) ||
+                last=""
+            fi
+            if [ -n "$last" ] && [ "$last" = "$HEAD_SHA" ]; then
+              docs_only=true scope=unchanged
+              echo "Unchanged since the last successful scheduled run (${HEAD_SHA:0:7}): the jobs in this workflow are skipped. The first scheduled run of each month runs regardless." \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
           fi
 
           case "$EVENT" in
@@ -339,7 +376,6 @@ jobs:
             echo "R code only (R/, man/, vignettes/, tests/testthat): this workflow reads none of it, so its jobs are skipped." \
               | tee -a "$GITHUB_STEP_SUMMARY"
           fi
-
   fanalyzer:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.docs-only != 'true' }}
