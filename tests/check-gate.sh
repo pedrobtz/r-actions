@@ -18,10 +18,29 @@ PY
 cat > "$work/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 # `gh api .../compare/...` with --jq: the count, then one path per line.
+# `gh api .../actions/workflows/<file>/runs...`: the last successful
+# scheduled run's head commit, from $LAST; `deny` fails as a token without
+# `actions: read` does.
 set -f
+case "$2" in
+  */actions/workflows/*)
+    [ "${LAST:-}" = deny ] && exit 1
+    printf '%s\n' "${LAST:-}"; exit 0 ;;
+esac
 printf '%s\n' "$(wc -w <<<"$FILES" | tr -d ' ')" $FILES
 STUB
-chmod +x "$work/bin/gh"
+# The anonymous fallback: $ANON is the last run's head commit, empty for none.
+cat > "$work/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+[ "${ANON:-}" = fail ] && exit 22
+printf '{"workflow_runs":[{"head_sha":"%s"}]}\n' "${ANON:-}"
+STUB
+# The day of the month, from $DAY.
+cat > "$work/bin/date" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "${DAY:-15}"
+STUB
+chmod +x "$work/bin/gh" "$work/bin/curl" "$work/bin/date"
 
 failed=0
 # case <name> <expected outputs> <event> <labels JSON> <workflow> <profile>
@@ -33,7 +52,7 @@ case_() {
     REPO=o/r EVENT="$3" LABELS="$4" R_ACTIONS_WORKFLOW="$5" R_ACTIONS_PROFILE="$6" \
     FILES="$7" WORKFLOW_REF="${8:-o/r/.github/workflows/native-checks.yaml@refs/pull/1/merge}" \
     FILE_RULES="${9:-true}" R_ACTIONS_SKIP_R_ONLY="${10:-}" \
-    PR_BASE=a PR_HEAD=b BEFORE=c AFTER=d FORCED=false \
+    PR_BASE=a PR_HEAD=b BEFORE=c AFTER=d FORCED=false HEAD_SHA=abc123 BRANCH=main \
     bash "$work/gate.sh" >/dev/null 2>&1
   local got; got=$(tr '\n' ' ' <"$out" | sed 's/ $//')
   if [ "$got" = "$want" ]; then echo "ok   $name"
@@ -84,5 +103,24 @@ case_ "docs only stays docs when opted in"  "docs-only=true scope=docs profile=f
 case_ "metadata stays metadata when opted in" "docs-only=true scope=metadata profile=full" pull_request '[]' fuzz "" "DESCRIPTION" "" true true
 case_ "file rules off: r-only runs"         "docs-only=false scope=code profile=full"   pull_request '[]' fuzz "" "$R" "" false true
 case_ "a rename out of R/ is code"          "docs-only=false scope=code profile=full"   pull_request '[]' fuzz "" "R/x.R src/x.c" "" true true
+
+# A scheduled run on the commit its workflow's last successful scheduled run
+# checked is skipped -- except in the first seven days of a month, and
+# whenever the answer is unclear. The commit here is abc123.
+U="docs-only=true scope=unchanged profile=full"
+# The workflow in these is rchk; fuzz is exempt and has its own case.
+F="docs-only=false scope=code profile=full"
+LAST=abc123 case_ "schedule, unchanged: skipped"        "$U" schedule null rchk auto "$R"
+LAST=0ld5ha case_ "schedule, moved: runs"               "$F" schedule null rchk auto "$R"
+LAST= case_ "schedule, no earlier run: runs"      "$F" schedule null rchk auto "$R"
+LAST=abc123 DAY=03 case_ "schedule, first week: runs"          "$F" schedule null rchk auto "$R"
+LAST=abc123 DAY=07 case_ "schedule, day 7 runs, day 8 skips"   "$F" schedule null rchk auto "$R"
+LAST=abc123 DAY=08 case_ "schedule, day 8: skipped"            "$U" schedule null rchk auto "$R"
+LAST=deny ANON=abc123 case_ "schedule, token denied, anon: skips" "$U" schedule null rchk auto "$R"
+LAST=deny ANON=fail case_ "schedule, both lookups fail: runs"   "$F" schedule null rchk auto "$R"
+LAST=abc123 case_ "schedule, odd workflow_ref: runs"    "$F" schedule null rchk auto "$R" "weird"
+LAST=abc123 case_ "dispatch on that commit: runs"       "$F" workflow_dispatch null fuzz auto "$R"
+LAST=abc123 case_ "schedule, fuzz, unchanged: runs"   "$F" schedule null fuzz auto "$R"
+LAST=abc123 case_ "push on that commit: classified"     "docs-only=false scope=code profile=quick" push null fuzz auto "$R"
 
 exit "$failed"

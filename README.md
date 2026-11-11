@@ -268,7 +268,8 @@ evidence of staleness.
 
 Measures test coverage with [covr](https://covr.r-lib.org/), writes a
 per-file breakdown to the job summary, and commits a self-hosted SVG badge to
-`.github/badges/coverage.svg` on every push to `main`/`master` (avoiding
+`.github/badges/coverage.svg` on every push to `main`/`master`, or on a
+scheduled or dispatched run of the default branch (avoiding
 external badge services) -- or, when that branch's rules reject direct pushes,
 to `badges/coverage.svg` on gh-pages (see `badge-branch` below). The badge colour thresholds are: green ≥ 90 %,
 yellow ≥ 75 %, orange ≥ 60 %, red below 60 %. The badge is rendered from a
@@ -1765,17 +1766,18 @@ the pull request's labels. The examples pass:
       profile: auto
 ```
 
-Quick by default: on each push to a pull request and on each push to main.
-The full set runs on a manual dispatch (`gh workflow run <caller> --ref main`)
-and on a schedule, and the examples schedule it weekly. A merge therefore costs
-a quick run, and the full set runs where someone asks for it: before a release,
-or once at the end of a series of merges. A pull
+Quick on each push to a pull request. The examples do not run on a push to
+main at all ([below](#pushes-to-main)). The full set runs on a manual dispatch
+(`gh workflow run <caller> --ref main`) and on a schedule, and the examples
+schedule it weekly. A merge therefore costs nothing, and the full set runs
+where someone asks for it: before a release, or once at the end of a series of
+merges. A pull
 request that touches something the quick set cannot see — a Windows-only code
 path, a Suggests guard — takes the `full-ci` label and runs in full while the
 label stays on. The examples list `labeled` and `unlabeled` among the
 `pull_request` types so that adding or removing a label starts a new run. Any
 label starts one, and the concurrency group below cancels the one it replaces.
-Callers that want the old behaviour, full on every push to main, can write
+Callers that keep a `push:` trigger and want the old behaviour, full on every push to main, can write
 `github.event_name == 'pull_request' && !contains(...labels..., 'full-ci') && 'quick' || 'full'`,
 which still works.
 
@@ -1811,6 +1813,50 @@ called workflow `github.workflow` and `github.ref` are the *caller's*, so a
 group written there names the caller's own group — which GitHub cancels as a
 deadlock — and the group of every sibling call in the same file.
 `tests/lint-workflows.py` fails on a reusable workflow that declares one.
+
+#### Pushes to main
+
+The examples carry no `push:` trigger, apart from `cran-release.yml`, which
+watches `CRAN-SUBMISSION`, and the caller's own pkgdown workflow, which
+deploys the site. A pull request's run already checks the merge of its head
+with main, so the push after merge checks the same tree a second time. On a
+free account that second run is paid for by every other package: on
+2026-11-11, 111 of the 206 runs queued across forty packages were pushes to
+main, and one housekeeping sweep merged into 28 packages queued 272 jobs.
+Callers that keep `push:` still work as before.
+
+What this gives up is two merges checked against a main that the other one
+has since changed: a conflict in meaning, not in text. The schedule finds it.
+A personal account has no merge queue to find it at merge time.
+
+Coverage follows: the example measures main weekly and on demand, and the
+`badge` job writes the badge on a scheduled or dispatched run of the default
+branch as it does on a push.
+
+#### Scheduled runs skip a commit they have checked
+
+A scheduled run of a gated workflow looks up that workflow's last successful
+scheduled run. If it was on the same commit, every gated job is skipped, and
+the gate reports `scope: unchanged`. Most packages are idle in a given week,
+and their full sets used to queue behind the active ones'.
+
+What sits under a commit still moves: the containers, R-devel, CRAN's
+packages. So a scheduled run in the first seven days of a month runs whatever
+the commit. A manual dispatch always runs. The lookup needs `actions: read`,
+which a caller's token need not hold, so the gate falls back to an anonymous
+request, which a public repository answers. If neither answers, everything
+runs.
+
+A failed run is not a successful one, so a package whose scheduled run went
+red runs again at the next slot even on the same commit.
+
+`fuzz.yml` is exempt. A campaign on the same commit still explores new
+inputs, and the corpus cache carries it from one scheduled run to the next.
+
+**Give each package its own slot.** The examples' crons are examples. Forty
+packages that copy `47 4 * * 1` start forty full sets on the same minute.
+Spread them: a different hour and weekday per package, a different minute per
+workflow.
 
 ### Documentation-only changes
 
@@ -2019,8 +2065,7 @@ as `.github/workflows/R-CMD-check.yml`, replacing the r-lib/actions template:
 
 ```yaml
 on:
-  push:
-    branches: [main, master]
+  # No `push:`: see "Pushes to main".
   # `labeled`/`unlabeled` so that adding or removing a CI label (`full-ci`,
   # `ci:minimal`, `skip-ci:<workflow>`) reruns it.
   pull_request:
@@ -2057,16 +2102,15 @@ is what the UI shows, and the caller's file name is what the badge URL uses.
 ### Coverage
 
 Copy [`examples/coverage.yml`](examples/coverage.yml) into your package as
-`.github/workflows/coverage.yml`. The `paths-ignore` filter prevents a push
-loop when the workflow commits an updated badge:
+`.github/workflows/coverage.yml`. It measures pull requests, and main weekly
+and on demand rather than on every push to it ("Pushes to main"):
 
 ```yaml
 on:
-  push:
-    branches: [main, master]
-    paths-ignore:
-      - ".github/badges/coverage.svg"
   pull_request:
+  schedule:
+    - cron: "29 2 * * 6"
+  workflow_dispatch:
 
 name: coverage
 
@@ -2101,8 +2145,7 @@ package as `.github/workflows/native-checks.yml`:
 
 ```yaml
 on:
-  push:
-    branches: [main, master]
+  # No `push:`: see "Pushes to main".
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
   # The full set runs weekly and on demand:
@@ -2119,7 +2162,7 @@ concurrency:
 
 # `profile` goes to the three workflows it changes: quick skips the asan
 # containers, valgrind and cran-special. lto, rchk and analyzers take minutes
-# either way and run on every push. gctorture has its own caller,
+# either way and run on every pull request push. gctorture has its own caller,
 # gctorture.yml, with step 20 on a schedule.
 jobs:
   sanitizers:
@@ -2163,8 +2206,7 @@ needs `gctorture`:
 
 ```yaml
 on:
-  push:
-    branches: [main, master]
+  # No `push:`: see "Pushes to main".
   pull_request:
 
 name: native-checks
