@@ -390,10 +390,13 @@ jobs:
           # every job runs -- unless a label on the pull request says
           # otherwise.
           #
-          # `scope` is `docs`, `metadata` or `code`. `docs-only` is true for
-          # the first two: every job gated on it skips both. r-cmd-check
-          # alone reads `scope`, and runs its quick runner legs for
-          # `metadata`, so a DESCRIPTION edit still gets one R CMD check.
+          # `scope` is `docs`, `metadata`, `r-only` or `code`. `docs-only` is
+          # true for all but `code`: every job gated on it skips them.
+          # r-cmd-check alone reads `scope`, and runs its quick runner legs
+          # for `metadata`, so a DESCRIPTION edit still gets one R CMD check.
+          # `r-only` is given only by a workflow that reads no R
+          # (R_ACTIONS_SKIP_R_ONLY, from its `skip-r-only` input); to every
+          # other workflow the same change is `code`.
           docs_only=false scope=code profile=full
           trap '{ echo "docs-only=$docs_only"; echo "scope=$scope"; echo "profile=$profile"; } >> "$GITHUB_OUTPUT"' EXIT
 
@@ -506,7 +509,7 @@ jobs:
           # URL or a reworded Description is worth one check, not the
           # sanitizers. README.Rmd is usually build-ignored, but it is
           # executed to render README.md, so it is not treated as prose.
-          all_docs=true any_meta=false
+          all_docs=true any_meta=false no_code=true any_r=false
           while IFS= read -r f; do
             case "$f" in
               _pkgdown.yml|_pkgdown.yaml|pkgdown/*) kind=docs ;;
@@ -517,6 +520,7 @@ jobs:
               .github/workflows/*)
                 if [ -n "$caller" ] && [ "$f" != "$caller" ]; then kind=docs; else kind=code; fi ;;
               .*/*.md) kind=docs ;;
+              R/*|man/*|vignettes/*|tests/testthat/*|tests/testthat.R) kind=r ;;
               */*) kind=code ;;
               *.md) kind=docs ;;
               *) kind=code ;;
@@ -525,7 +529,8 @@ jobs:
             case "$kind" in
               docs) ;;
               meta) any_meta=true ;;
-              *) all_docs=false ;;
+              r) all_docs=false any_r=true ;;
+              *) all_docs=false no_code=false ;;
             esac
           done < <(tail -n +2 <<<"$files")
 
@@ -536,6 +541,14 @@ jobs:
           elif [ "$all_docs" = true ]; then
             docs_only=true scope=docs
             echo "Documentation only: the jobs in this workflow are skipped." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "$no_code" = true ] && [ "$any_r" = true ] \
+               && [ "${R_ACTIONS_SKIP_R_ONLY:-false}" = true ] && ! has_label full-ci; then
+            # R code, its tests and its documentation, and nothing else. A
+            # workflow that compiles the C without R cannot see the change.
+            # `full-ci` asks for everything, so it runs this too.
+            docs_only=true scope=r-only
+            echo "R code only (R/, man/, vignettes/, tests/testthat): this workflow reads none of it, so its jobs are skipped." \
               | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 

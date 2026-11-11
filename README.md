@@ -1151,7 +1151,8 @@ jobs:
 Inputs: `script` (default `tools/ci/platform.sh`), `os` (a JSON array of
 runner labels, default macOS and Windows), `setup-r` (default true, which on
 Windows is also what puts Rtools on the PATH), `r-dependencies`,
-`python-version`, `timeout-minutes`, `profile` and `skip-docs-only`. The
+`python-version`, `timeout-minutes`, `profile`, `skip-docs-only` and
+`skip-r-only` (see [R-only changes](#r-only-changes)). The
 whole example is [`examples/platforms.yml`](examples/platforms.yml).
 
 The portfolio's rule (`packages/claude/shared/ci.md`): a package's own per-OS
@@ -1869,6 +1870,39 @@ read`, which a caller need not hold, and a reusable workflow asking for more
 than its caller holds is a `startup_failure`. Its log lists every changed file
 as `docs`, `meta` or `code`, and a skip says so in the job summary.
 
+#### R-only changes
+
+A change to R code runs everything, as code should. But some workflows never
+read R: `fuzz.yml` compiles the C without it, and a package's
+`tools/ci/platform.sh` often runs only a C test suite, on the macOS and
+Windows runners a free account has fewest of. Such a workflow can say so:
+
+```yaml
+jobs:
+  fuzz:
+    uses: pedrobtz/r-actions/.github/workflows/fuzz.yml@v1
+    with:
+      skip-r-only: true
+```
+
+`fuzz.yml`, `platforms.yml` and `changes.yml` take `skip-r-only`, false by
+default. With it, the workflow's jobs are skipped when every changed file is
+under `R/`, `man/`, `vignettes/` or `tests/testthat` (or is `tests/testthat.R`),
+beside whatever already counts as documentation or metadata. The gate then
+reports `scope: r-only`. Anything else makes the change `code`: `src/`,
+`fuzz/`, `tools/`, `inst/`, `configure`, a file elsewhere under `tests/`.
+
+It is decided from the file list, not by a label, so nobody has to judge
+whether a diff "cannot reach the C". A `full-ci` pull request runs the
+workflow anyway, and `skip-docs-only: false` turns this rule off with the
+others. Every other workflow still sees the same change as `code`:
+`r-cmd-check`, the sanitizers and valgrind run the R suite, so they never
+take the input.
+
+Do not set it on a workflow whose checks read files under `tests/testthat`
+(a fuzz corpus seeded from test fixtures, a C test that loads them), or on a
+`platforms.yml` whose script installs the package or runs R.
+
 #### Labels
 
 A label on a pull request can ask for less, or for more:
@@ -1918,7 +1952,8 @@ jobs:
 ```
 
 It needs only `contents: read`. Its outputs are `docs-only`, `scope`
-(`docs`, `metadata` or `code`) and `profile` (`quick` or `full`, from its
+(`docs`, `metadata`, `r-only` with `skip-r-only: true`, or `code`) and
+`profile` (`quick` or `full`, from its
 `profile` input, which takes `auto`).
 
 It is on by default, so every caller gets it when `v1` moves. To always run:
