@@ -273,6 +273,12 @@ jobs:
                 | tee -a "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
+            if has_label ci:docs; then
+              docs_only=true scope=docs
+              echo "Skipped by the \`ci:docs\` label: every gated job is skipped on this pull request." \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
             if has_label ci:minimal; then
               docs_only=true scope=metadata
               echo "Reduced by the \`ci:minimal\` label: r-cmd-check runs its quick runner legs, and every other gated job is skipped on this pull request." \

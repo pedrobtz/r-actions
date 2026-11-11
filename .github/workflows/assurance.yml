@@ -209,6 +209,7 @@ jobs:
               print(f"::error::ungated-jobs must be warn or fail, not {mode!r}")
               sys.exit(1)
           GATE = "needs.changes.outputs.docs-only != 'true'"
+          SKIPPED = "needs.changes.result != 'skipped'"
           # ci.md: a documentation-only change still runs coverage and pkgdown.
           EXEMPT = {"pkgdown", "coverage"}
           findings = []
@@ -237,6 +238,11 @@ jobs:
               if isinstance(pr, dict) and "paths" in pr:
                   continue          # runs only when the files it names change
               lines = text.splitlines()
+              # A label gate on `changes` (ci.md) is decided without a runner;
+              # when it skips, docs-only is empty, so a job testing only
+              # `!= 'true'` would run on the very pull requests it skipped.
+              chg = (doc.get("jobs") or {}).get("changes")
+              chg_gated = isinstance(chg, dict) and "if" in chg
               for job, body in (doc.get("jobs") or {}).items():
                   if not isinstance(body, dict):
                       continue
@@ -248,6 +254,12 @@ jobs:
                   needs = body.get("needs")
                   needs = [needs] if isinstance(needs, str) else (needs or [])
                   if "changes" in needs and GATE in cond:
+                      if chg_gated and SKIPPED not in cond:
+                          at = next((i for i, l in enumerate(lines)
+                                     if re.match(rf"^  {re.escape(str(job))}:\s*(#.*)?$", l)), None)
+                          findings.append((wf, at, f"job `{job}` runs when the label-gated "
+                                           "`changes` job is skipped: add `" + SKIPPED +
+                                           " &&` to its `if:` (ci.md)"))
                       continue
                   at = next((i for i, l in enumerate(lines)
                              if re.match(rf"^  {re.escape(str(job))}:\s*(#.*)?$", l)), None)

@@ -1910,6 +1910,7 @@ A label on a pull request can ask for less, or for more:
 | Label | Effect on the pull request's runs |
 |---|---|
 | `full-ci` | `profile: auto` resolves to `full`; overrides every label below |
+| `ci:docs` | treated as a documentation-only change: every gated job is skipped, `r-cmd-check`'s included; outranks `ci:minimal` |
 | `ci:minimal` | treated as a metadata change: r-cmd-check runs its `quick-runners` legs and every other gated job is skipped |
 | `skip-ci:<workflow>` | every job in that workflow is skipped — `skip-ci:fuzz`, `skip-ci:valgrind`, `skip-ci:r-cmd-check`. The name is the reusable workflow's file name without `.yml`, or the `name` a caller gives `changes.yml` |
 
@@ -1929,9 +1930,51 @@ The labels have to exist in the repository before they can be applied:
 
 ```sh
 gh label create full-ci     --color B60205 --force --description "Run the full CI set on this pull request"
+gh label create ci:docs     --color C5DEF5 --force --description "Documentation only: no checks on this pull request"
 gh label create ci:minimal  --color 0E8A16 --force --description "One quick R CMD check on this pull request"
 gh label create skip-ci:fuzz --color FBCA04 --force --description "Skip fuzz.yml on this pull request"
 ```
+
+#### Skipping without a runner
+
+The gate is a job, so on its own it still takes a runner to decide that
+nothing runs: twelve of them, one per workflow, for a pull request that
+changes a README. A job's `if:` is evaluated by GitHub without a runner, and
+a pull request's labels are in the event, so the caller can test the labels
+there. A skipped calling job starts nothing, the reusable workflow's own
+`changes` job included:
+
+```yaml
+jobs:
+  sanitizers:
+    # Decided without a runner; the gate inside repeats it for a caller
+    # that does not.
+    if: >-
+      github.event_name != 'pull_request'
+      || contains(github.event.pull_request.labels.*.name, 'full-ci')
+      || !(contains(github.event.pull_request.labels.*.name, 'ci:docs')
+        || contains(github.event.pull_request.labels.*.name, 'ci:minimal')
+        || contains(github.event.pull_request.labels.*.name, 'skip-ci:sanitizers'))
+    uses: pedrobtz/r-actions/.github/workflows/sanitizers.yml@v1
+```
+
+Leave `ci:minimal` out of the `r-cmd-check` caller's test: that label still
+runs its quick legs. The file rules still need the gate, and so a runner; a
+documentation-only pull request with no label is classified as before.
+
+On a package's own `changes` job the same `if:` works, with one more term in
+every job that needs it. A skipped `changes` has empty outputs, so
+`docs-only != 'true'` alone would run its dependents on exactly the pull
+requests the label skipped:
+
+```yaml
+  fuzz:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result != 'skipped' && needs.changes.outputs.docs-only != 'true' }}
+```
+
+`assurance.yml`'s gating step fails a dependent of a label-gated `changes`
+that leaves that term out.
 
 #### The gate for a package's own workflows
 

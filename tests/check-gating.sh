@@ -132,6 +132,40 @@ Y
 case_ ignore fail 1 "gates with \`paths-ignore\`"
 case_ ignore fail 1 "!release.yaml"
 
+# A label gate on the changes job: GitHub decides it without a runner, and
+# a skipped `changes` leaves docs-only empty, so its dependents must test
+# that it ran or they run on exactly the pull requests the label skipped.
+wf labelled own.yaml <<'Y'
+on: pull_request
+jobs:
+  changes:
+    if: >-
+      github.event_name != 'pull_request'
+      || contains(github.event.pull_request.labels.*.name, 'full-ci')
+      || !contains(github.event.pull_request.labels.*.name, 'ci:docs')
+    uses: pedrobtz/r-actions/.github/workflows/changes.yml@v1
+  ctest:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result != 'skipped' && needs.changes.outputs.docs-only != 'true' }}
+    runs-on: ubuntu-latest
+    steps: [{run: make}]
+Y
+case_ labelled fail 0 "0 ungated jobs"
+
+wf labelled-open own.yaml <<'Y'
+on: pull_request
+jobs:
+  changes:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'ci:docs') }}
+    uses: pedrobtz/r-actions/.github/workflows/changes.yml@v1
+  ctest:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs-only != 'true' }}
+    runs-on: ubuntu-latest
+    steps: [{run: make}]
+Y
+case_ labelled-open fail 1 "needs.changes.result != 'skipped'"
+
 # The mode is checked, not read as the weaker one.
 case_ clean loose 1 "ungated-jobs must be warn or fail"
 
