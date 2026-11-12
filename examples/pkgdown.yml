@@ -1,0 +1,28 @@
+# Builds the pkgdown site on every pull request and deploys it from main and
+# from each release. CLAUDE.md and AGENTS.md are kept off the site.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+name: pkgdown.yaml
+
+jobs:
+  pkgdown:
+    # Decided without a runner. A documentation-only change still builds the
+    # site, so `ci:docs` is not tested here; `ci:minimal` and the workflow's
+    # own label skip it.
+    if: >-
+      github.event_name != 'pull_request'
+      || contains(github.event.pull_request.labels.*.name, 'full-ci')
+      || !(contains(github.event.pull_request.labels.*.name, 'ci:minimal')
+        || contains(github.event.pull_request.labels.*.name, 'skip-ci:pkgdown'))
+    # Deploys queue rather than cancel one another; pull requests run apart.
+    concurrency:
+      group: pkgdown-${{ github.event_name != 'pull_request' || github.run_id }}
+    permissions:
+      contents: write
+    uses: pedrobtz/r-actions/.github/workflows/pkgdown.yml@v1
