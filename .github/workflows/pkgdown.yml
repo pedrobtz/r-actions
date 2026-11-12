@@ -121,7 +121,7 @@ jobs:
         run: |
           while IFS= read -r f; do
             f=${f//[[:space:]]/}
-            [ -n "$f" ] && rm -f -- "$f"
+            if [ -n "$f" ]; then rm -f -- "$f"; fi
           done <<< "$EXCLUDE"
 
       - name: Build site
