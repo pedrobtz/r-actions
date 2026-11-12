@@ -53,21 +53,19 @@ on:
       badge-branch:
         description: >
           Branch the `badge` job commits the SVG to. `auto`, the default,
-          commits to the branch that triggered the run, unless that branch's
-          rules reject a direct push (a ruleset requiring pull requests,
-          status checks, signed commits or restricting updates) and the
-          repository has a gh-pages branch: then it commits to gh-pages.
-          Empty commits to the triggering branch unconditionally (the
-          behaviour before v1.25.0); any other value names the branch, which
-          must exist.
+          commits to gh-pages whenever the repository has that branch, and
+          otherwise to the branch that triggered the run (since v1.41.0;
+          before, `auto` moved to gh-pages only when the triggering branch's
+          rules rejected a direct push). Empty commits to the triggering
+          branch unconditionally (the behaviour before v1.25.0); any other
+          value names the branch, which must exist.
 
-          Without that redirect a ruleset requiring pull requests rejects the
-          badge commit -- "Changes must be made through a pull request" --
-          so the job fails after its retries on every push, and the badge
-          freezes at its last value. gh-pages already takes bot pushes from a
-          pkgdown deploy, and a default-branch ruleset does not cover it.
-          Classic branch protection is not visible to the job's token, so a
-          branch protected that way still needs `badge-branch: gh-pages`.
+          gh-pages already takes bot pushes from a pkgdown deploy, and a
+          default-branch ruleset does not cover it. A badge committed to the
+          default branch instead adds a bot commit to its history on every
+          run, which conflicts with open pull requests, and is rejected
+          outright -- "Changes must be made through a pull request" -- by a
+          ruleset requiring pull requests.
 
           If a pkgdown deploy writes to the same branch, it must not
           force-push: JamesIves' github-pages-deploy-action does by default,
@@ -200,12 +198,14 @@ jobs:
       contents: write
 
     steps:
-      # Where the badge goes. `auto` keeps the triggering branch unless its
-      # rules would reject this job's push, and only then moves to gh-pages,
-      # so a caller whose badge commits work today sees no change. Both
-      # questions go to the API rather than to git, because the checkout
-      # below needs the answer as its ref. An empty branch output is
-      # checkout's own default, the triggering ref.
+      # Where the badge goes. `auto` commits to gh-pages whenever the
+      # repository has that branch, so a bot commit never lands in the
+      # default branch's history (where it conflicts with open pull requests
+      # and needs a paths-ignore in every caller). Without gh-pages it keeps
+      # the triggering branch, and warns when that branch's rules would
+      # reject the push. The question goes to the API rather than to git,
+      # because the checkout below needs the answer as its ref. An empty
+      # branch output is checkout's own default, the triggering ref.
       - name: Resolve badge target
         id: target
         env:
@@ -216,16 +216,16 @@ jobs:
           set -eu
           if [ "$BRANCH" = "auto" ]; then
             BRANCH=""
-            # Rule types that reject a bot's direct push of an unsigned
-            # commit; deletion, non_fast_forward and linear history do not.
-            blocking=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${GITHUB_REF_NAME}" \
-              --jq '[.[].type | select(. == "pull_request" or . == "required_status_checks" or . == "update" or . == "required_signatures" or . == "required_deployments")] | unique | join(",")' \
-              2>/dev/null || true)
-            if [ -n "$blocking" ]; then
-              if gh api "repos/${GITHUB_REPOSITORY}/branches/gh-pages" --silent 2>/dev/null; then
-                BRANCH=gh-pages
-                echo "${GITHUB_REF_NAME} rejects direct pushes (${blocking}); committing the badge to gh-pages."
-              else
+            if gh api "repos/${GITHUB_REPOSITORY}/branches/gh-pages" --silent 2>/dev/null; then
+              BRANCH=gh-pages
+              echo "Committing the badge to gh-pages."
+            else
+              # Rule types that reject a bot's direct push of an unsigned
+              # commit; deletion, non_fast_forward and linear history do not.
+              blocking=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${GITHUB_REF_NAME}" \
+                --jq '[.[].type | select(. == "pull_request" or . == "required_status_checks" or . == "update" or . == "required_signatures" or . == "required_deployments")] | unique | join(",")' \
+                2>/dev/null || true)
+              if [ -n "$blocking" ]; then
                 echo "::warning::${GITHUB_REF_NAME} rejects direct pushes (${blocking}) and there is no gh-pages branch, so the badge commit will be rejected. Set badge-branch to a branch that takes bot pushes."
               fi
             fi

@@ -268,10 +268,11 @@ evidence of staleness.
 
 Measures test coverage with [covr](https://covr.r-lib.org/), writes a
 per-file breakdown to the job summary, and commits a self-hosted SVG badge to
-`.github/badges/coverage.svg` on every push to `main`/`master`, or on a
-scheduled or dispatched run of the default branch (avoiding
-external badge services) -- or, when that branch's rules reject direct pushes,
-to `badges/coverage.svg` on gh-pages (see `badge-branch` below). The badge colour thresholds are: green ≥ 90 %,
+`badges/coverage.svg` on gh-pages on every push to `main`/`master`, or on a
+scheduled or dispatched run of the default branch (avoiding external badge
+services). A repository with no gh-pages branch gets it at
+`.github/badges/coverage.svg` on the triggering branch instead (see
+`badge-branch` below). The badge colour thresholds are: green ≥ 90 %,
 yellow ≥ 75 %, orange ≥ 60 %, red below 60 %. The badge is rendered from a
 template in the workflow itself, so the job that can write to your repository
 downloads nothing to do it.
@@ -296,32 +297,31 @@ To display the badge in your README, add the following line (replacing
 `{owner}/{repo}` with your repository):
 
 ```markdown
-![Coverage]({owner}/{repo}/raw/main/.github/badges/coverage.svg)
-```
-
-#### `badge-branch` — when the default branch takes no direct pushes
-
-A ruleset that requires pull requests on the default branch rejects the badge
-commit ("Changes must be made through a pull request"), so the `badge` job
-would fail after its retries on every push and the badge freeze at its last
-value. The default, `badge-branch: auto`, checks the triggering branch's rules
-first: when they reject a direct push (pull requests, required status checks,
-signed commits, update restrictions or deployments) and the repository has a
-gh-pages branch, the badge goes to `badges/coverage.svg` on gh-pages instead.
-For a package with a pkgdown site that is the natural target: it already takes
-bot pushes, and a default-branch ruleset does not cover it. A branch whose
-pushes go through keeps its badge where it is.
-
-With a ruleset on `main`, point the README at gh-pages:
-
-```markdown
 ![Coverage](https://raw.githubusercontent.com/{owner}/{repo}/gh-pages/badges/coverage.svg)
 ```
 
+#### `badge-branch` — where the badge is committed
+
+The default, `badge-branch: auto`, commits the badge to `badges/coverage.svg`
+on gh-pages whenever the repository has that branch. For a package with a
+pkgdown site that is the natural target: it already takes bot pushes, a
+default-branch ruleset does not cover it, and the default branch's history
+gains no bot commit per run to conflict with open pull requests.
+
+Before v1.41.0, `auto` kept the badge on the triggering branch unless that
+branch's rules rejected a direct push. A package whose badge is still at
+`.github/badges/coverage.svg` on `main` moves with the next run: copy the
+current SVG to `badges/coverage.svg` on gh-pages, point the README at it, and
+delete the old file.
+
+Without a gh-pages branch, `auto` commits to the triggering branch and warns
+when its rules would reject the push (pull requests, required status checks,
+signed commits, update restrictions or deployments); the README then uses
+`{owner}/{repo}/raw/main/.github/badges/coverage.svg`.
+
 To choose explicitly, name the branch (and optionally the path); an empty
 `badge-branch` always commits to the triggering branch, the behaviour before
-v1.25.0. Classic branch protection is not visible to the job's token, so a
-branch protected that way needs the explicit setting:
+v1.25.0:
 
 ```yaml
 jobs:
