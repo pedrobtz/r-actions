@@ -1,0 +1,173 @@
+# Builds the pkgdown site and deploys it to gh-pages, keeping the files a
+# package writes for coding agents (CLAUDE.md, AGENTS.md) off the site.
+#
+# pkgdown renders every top-level .md file as a page, and neither
+# _pkgdown.yml nor .Rbuildignore can opt one out: pkgdown::package_mds()
+# skips a hardcoded list (README, LICENSE, NEWS, cran-comments.md, the issue
+# and pull request templates) and nothing else. So the files are deleted
+# from this throwaway checkout before the build, which keeps them out of the
+# sitemap and the search index as well, and any page an earlier deploy
+# published for them is deleted from the pages branch after this one.
+on:
+  workflow_call:
+    inputs:
+      exclude:
+        description: >
+          Top-level Markdown files to keep off the site, one per line. Each
+          is deleted from the checkout before the build, and the page an
+          earlier deploy made of it (CLAUDE.md -> CLAUDE.html) is deleted
+          from the pages branch after a deploy.
+        type: string
+        required: false
+        default: |
+          CLAUDE.md
+          AGENTS.md
+      extra-packages:
+        description: >
+          More packages for setup-r-dependencies, in its syntax
+          (`any::sf, github::owner/repo`), for articles that use a package
+          `Config/Needs/website` cannot name. `any::pkgdown` and `local::.`
+          are always installed.
+        type: string
+        required: false
+        default: ""
+      env:
+        description: >
+          Environment variables for the build, one `NAME=value` per line, set
+          before the dependencies are installed (`NOT_CRAN=true`, a build's
+          job count).
+        type: string
+        required: false
+        default: ""
+      pre-build:
+        description: >
+          Shell command run after the dependencies are installed and before
+          the site is built: starting a service the articles connect to, for
+          example. It runs in the package root, under bash.
+        type: string
+        required: false
+        default: ""
+      deploy:
+        description: >
+          Deploy the built site. Even when true, it deploys only from a push
+          or dispatch on the default branch and from a published release,
+          never from a pull request or another branch (a `develop` the
+          caller also builds).
+        type: boolean
+        required: false
+        default: true
+      branch:
+        description: Branch the site is deployed to.
+        type: string
+        required: false
+        default: gh-pages
+      timeout-minutes:
+        description: >
+          Timeout for the job. Without one, a hung article holds the runner
+          for GitHub's six-hour default.
+        type: number
+        required: false
+        default: 30
+
+name: pkgdown
+
+jobs:
+  pkgdown:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # Writes the site to the pages branch. The caller grants the same scope,
+    # since a reusable workflow's token is capped by the caller's grant.
+    permissions:
+      contents: write
+    env:
+      GITHUB_PAT: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set the build environment
+        if: inputs.env != ''
+        env:
+          BUILD_ENV: ${{ inputs.env }}
+        run: |
+          while IFS= read -r line; do
+            line=${line#"${line%%[![:space:]]*}"}
+            [ -z "$line" ] && continue
+            case $line in
+              [A-Za-z_]*=*) printf '%s\n' "$line" >> "$GITHUB_ENV" ;;
+              *) echo "::error::env: expected NAME=value, got: $line"; exit 1 ;;
+            esac
+          done <<< "$BUILD_ENV"
+
+      - uses: r-lib/actions/setup-pandoc@v2
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::pkgdown, local::.${{ inputs.extra-packages != '' && format(', {0}', inputs.extra-packages) || '' }}
+          needs: website
+
+      - name: Run the pre-build command
+        if: inputs.pre-build != ''
+        env:
+          PRE_BUILD: ${{ inputs.pre-build }}
+        run: bash -euo pipefail -c "$PRE_BUILD"
+
+      - name: Keep agent instructions off the site
+        env:
+          EXCLUDE: ${{ inputs.exclude }}
+        run: |
+          while IFS= read -r f; do
+            f=${f//[[:space:]]/}
+            [ -n "$f" ] && rm -f -- "$f"
+          done <<< "$EXCLUDE"
+
+      - name: Build site
+        run: pkgdown::build_site_github_pages(new_process = FALSE, install = FALSE)
+        shell: Rscript {0}
+
+      # No force-push and no clean: coverage.yml commits its badge to the
+      # pages branch between deploys (badges/coverage.svg), and either one
+      # would drop it.
+      - name: Deploy to GitHub Pages
+        id: deploy
+        if: >-
+          inputs.deploy
+          && github.event_name != 'pull_request'
+          && (github.event_name == 'release'
+            || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        uses: JamesIves/github-pages-deploy-action@fa24774553152dd7873cd16ebd8d959b010c5445 # v4.9.0
+        with:
+          clean: false
+          force: false
+          branch: ${{ inputs.branch }}
+          folder: docs
+
+      # `clean: false` keeps every page an earlier deploy published, so a
+      # CLAUDE.html from before the file was excluded would stay online.
+      # Deleted one file at a time, through the API, so nothing else on the
+      # branch is touched.
+      - name: Remove agent pages published earlier
+        if: steps.deploy.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXCLUDE: ${{ inputs.exclude }}
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          while IFS= read -r f; do
+            f=${f//[[:space:]]/}
+            [ -z "$f" ] && continue
+            page="$(basename "${f%.md}").html"
+            for attempt in 1 2 3; do
+              sha=$(gh api "repos/$GITHUB_REPOSITORY/contents/$page?ref=$BRANCH" --jq .sha 2>/dev/null) || break
+              if gh api -X DELETE "repos/$GITHUB_REPOSITORY/contents/$page" \
+                  -f message="Remove $page: $f is kept off the site" \
+                  -f sha="$sha" -f branch="$BRANCH" >/dev/null; then
+                echo "Removed $page from $BRANCH"
+                break
+              fi
+              sleep $((attempt * 5))
+            done
+          done <<< "$EXCLUDE"

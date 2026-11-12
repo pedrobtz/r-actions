@@ -17,6 +17,7 @@ WORKFLOWS = pathlib.Path(".github/workflows")
 WRITERS = {
     "coverage.yml": {"contents": "write"},
     "cran-release.yml": {"contents": "write", "pull-requests": "write"},
+    "pkgdown.yml": {"contents": "write"},
     "release.yml": {"contents": "write"},
     "report.yml": {"issues": "write"},
     "vendor-upstream.yml": {"contents": "read", "issues": "write"},
@@ -34,6 +35,7 @@ UNGATED = {
     "assurance.yml": "the file it checks is Markdown under a dot directory, which the gate calls documentation",
     "cran-release.yml": "it runs on a push that changes CRAN-SUBMISSION, never on a diff of code",
     "coverage.yml": "its job summary and badge are wanted on every change",
+    "pkgdown.yml": "it builds the documentation, so a documentation-only change is the one it must run on",
     "report.yml": "it runs after another job, on that job's result, not on a diff",
     "revdep.yml": "callers trigger it on the paths consumers see, and on a schedule",
     "vendor.yml": "it matches its own paths and takes seconds",

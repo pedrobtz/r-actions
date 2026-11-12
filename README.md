@@ -1736,6 +1736,69 @@ Two settings on the caller's side:
 | `file` | `CRAN-SUBMISSION` | path of the submission record |
 | `bump` | `true` | open the `<version>.9000` pull request |
 
+### `pkgdown.yml` — the site, without the agent instructions
+
+Builds the pkgdown site and deploys it to `gh-pages`, as r-lib's
+`pkgdown.yaml` example does, with one difference: `CLAUDE.md` and `AGENTS.md`
+never become pages.
+
+pkgdown renders every top-level `.md` file as a page, and nothing in
+`_pkgdown.yml` or `.Rbuildignore` opts one out: `pkgdown::package_mds()`
+skips a hardcoded list (README, LICENSE, NEWS, `cran-comments.md`, the issue
+and pull request templates) and nothing else. A package that keeps its agent
+instructions at the root, where an `@` import in `CLAUDE.md` has to resolve,
+therefore publishes them as `CLAUDE.html`, linked from the sitemap and found
+by the site search. The workflow deletes the files from its throwaway checkout
+before the build, then deletes any page an earlier deploy published for them
+from the pages branch, because the deploy itself runs with `clean: false`.
+
+It deploys with `force: false` and `clean: false`, so the coverage badge
+`coverage.yml` commits to `gh-pages` between deploys survives. It deploys only
+from the default branch and from a published release, never from a pull
+request or another branch the caller also builds.
+
+Copy [`examples/pkgdown.yml`](examples/pkgdown.yml) into your package as
+`.github/workflows/pkgdown.yaml`:
+
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+name: pkgdown.yaml
+
+jobs:
+  pkgdown:
+    if: >-
+      github.event_name != 'pull_request'
+      || contains(github.event.pull_request.labels.*.name, 'full-ci')
+      || !(contains(github.event.pull_request.labels.*.name, 'ci:minimal')
+        || contains(github.event.pull_request.labels.*.name, 'skip-ci:pkgdown'))
+    concurrency:
+      group: pkgdown-${{ github.event_name != 'pull_request' || github.run_id }}
+    permissions:
+      contents: write
+    uses: pedrobtz/r-actions/.github/workflows/pkgdown.yml@v1
+```
+
+A documentation-only change still builds the site, so the job does not test
+`ci:docs`; `ci:minimal` and `skip-ci:pkgdown` skip it. Keep the job named
+`pkgdown`: `assurance.yml` exempts that name from the documentation-only gate.
+
+| input | default | |
+|---|---|---|
+| `exclude` | `CLAUDE.md`, `AGENTS.md` | top-level Markdown files kept off the site, one per line |
+| `extra-packages` | | more packages to install, in setup-r-dependencies' syntax |
+| `env` | | `NAME=value` lines set for the build |
+| `pre-build` | | shell command run before the build, such as starting a service |
+| `deploy` | `true` | deploy from the default branch and from releases |
+| `branch` | `gh-pages` | branch the site is deployed to |
+| `timeout-minutes` | `30` | timeout for the job |
+
 ### Quick by default, full on demand
 
 Run everything on every push to a pull request and one job decides how long
