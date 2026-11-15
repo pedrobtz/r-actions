@@ -303,6 +303,13 @@ To display the badge in your README, add the following line (replacing
 ![Coverage](https://raw.githubusercontent.com/{owner}/{repo}/gh-pages/badges/coverage.svg)
 ```
 
+#### `fail-under` — a floor on coverage
+
+`fail-under: 80` fails the coverage job when the package's coverage (R and
+native together, as covr reports it) is below 80%. The default, 0, never
+fails. Set it a little under the current figure: a change that drops
+coverage then goes red instead of only moving the badge.
+
 #### `badge-branch` — where the badge is committed
 
 The default, `badge-branch: auto`, commits the badge to `badges/coverage.svg`
