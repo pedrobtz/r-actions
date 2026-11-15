@@ -81,6 +81,31 @@ on:
         type: string
         required: false
         default: ""
+      skip:
+        description: >
+          C sources under `src/` that are compiled without the analyzer, one
+          entry per line, written repo-relative as `exclude` is. An entry
+          with no glob character is a directory prefix; anything else is a
+          shell glob.
+
+              skip: |
+                src/vendor
+                src/mylib_vendored.c
+
+          Where `exclude` keeps findings from gating but still pays for the
+          analysis, `skip` does not run it: each listed file's object gets
+          `-fno-analyzer` after the analyzer flags, through a per-object
+          rule in the job's Makevars. It is for vendored code too large to
+          analyse in the job's time or memory, and for a wrapper that
+          `#include`s such code, which `exclude` cannot name because the
+          vendored path is what appears in the diagnostics.
+
+          The files skipped are listed in the job summary. A job that skips
+          every C file fails, since it would report "0 findings" having
+          analysed nothing.
+        type: string
+        required: false
+        default: ""
       fail-on-findings:
         description: >
           Fail the job when the analyzer reports anything outside `exclude`,
@@ -450,17 +475,58 @@ jobs:
       # without it GCC may wrap long messages to the terminal width and emit
       # colour escapes, and a diagnostic split across two lines is one this
       # job's parser will not see.
+      #
+      # `skip` becomes one target-specific line per object,
+      #   vendor/mir.o: CFLAGS += -fno-analyzer
+      # named as R's make names it, relative to src/. GCC takes the last of
+      # -fanalyzer and -fno-analyzer, and a target-specific `+=` lands after
+      # the global one, so the file compiles as before minus the analysis.
       - name: Turn the analyzer on
         if: steps.probe.outputs.skip == 'false'
+        id: analyzer
         env:
           ANALYZER_FLAGS: ${{ inputs.analyzer-flags }}
+          SKIP: ${{ inputs.skip }}
         run: |
           set -eu
           target="${R_MAKEVARS_USER:-${HOME}/.R/Makevars}"
           mkdir -p "$(dirname "$target")"
           printf 'CFLAGS += %s -fdiagnostics-plain-output\n' "$ANALYZER_FLAGS" >> "$target"
+
+          # Matched as `exclude` is: no glob character is a directory
+          # prefix, anything else a glob, the pattern unquoted on the right
+          # of `case` so that it globs.
+          : > analyzer-skipped.txt
+          total=0
+          while IFS= read -r f; do
+            total=$((total + 1))
+            hit=""
+            while IFS= read -r pat; do
+              [ -n "$pat" ] || continue
+              case "$pat" in
+                *[*?[]*) case "$f" in $pat) hit=1 ;; esac ;;
+                *)       case "$f" in "${pat%/}"/*|"$pat") hit=1 ;; esac ;;
+              esac
+              if [ -n "$hit" ]; then break; fi
+            done <<< "$SKIP"
+            if [ -n "$hit" ]; then
+              echo "$f" >> analyzer-skipped.txt
+              obj="${f#src/}"; obj="${obj%.c}.o"
+              printf '%s: CFLAGS += -fno-analyzer\n' "$obj" >> "$target"
+            fi
+          done < <(find src -name '*.c' | sort)
+
+          skipped=$(wc -l < analyzer-skipped.txt | tr -d ' ')
+          echo "skipped=${skipped}" >> "$GITHUB_OUTPUT"
           echo "--- appended to ${target} ---"
           cat "$target"
+          if [ -n "$SKIP" ] && [ "$skipped" -eq 0 ]; then
+            echo "::warning::\`skip\` matched no C file under src/, so every file is analysed."
+          fi
+          if [ "$skipped" -gt 0 ] && [ "$skipped" -eq "$total" ]; then
+            echo "::error::\`skip\` covers all ${total} C files under src/, so nothing would be analysed."
+            exit 1
+          fi
 
       # --preclean, for the reason the sanitizer jobs give: a stale object
       # newer than its source is not recompiled, and a job that analysed
@@ -570,6 +636,14 @@ jobs:
             echo
             echo "**${gated} finding(s)**, plus ${excluded} in excluded paths."
             echo
+            if [ -s analyzer-skipped.txt ]; then
+              echo "<details><summary>$(wc -l < analyzer-skipped.txt | tr -d ' ') file(s) compiled without the analyzer (\`skip\`)</summary>"
+              echo
+              sed 's/^/- `/; s/$/`/' analyzer-skipped.txt
+              echo
+              echo "</details>"
+              echo
+            fi
             if [ "$gated" -gt 0 ]; then
               echo "| Check | Count |"
               echo "|:------|------:|"
@@ -632,6 +706,7 @@ jobs:
           name: analyzer-${{ inputs.container }}
           path: |
             analyzer-build.log
+            analyzer-skipped.txt
             findings.all
           if-no-files-found: ignore
           retention-days: 7

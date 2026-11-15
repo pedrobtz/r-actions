@@ -1583,6 +1583,8 @@ jobs:
       fail-on-findings: true
       exclude: |
         src/cyaml*.c
+      skip: |                      # compiled without the analyzer
+        src/vendor
       container: ubuntu-gcc16      # default
       analyzer-flags: -fanalyzer   # default
       timeout-minutes: 45          # default
@@ -1596,6 +1598,15 @@ repo-relative (`src/cyaml*.c`) even though R compiles from inside `src/` and
 the compiler says `cyaml.c`; the job puts the path back before matching.
 Excluded findings are still shown in the summary, under their own heading,
 rather than dropped.
+
+`exclude` still pays for the analysis. When vendored code is too large to
+analyse at all (MIR's generator ran GCC out of memory in zumir), list it in
+`skip` instead: those files are compiled with `-fno-analyzer`, through a
+per-object rule in the job's Makevars, so they produce no findings and cost
+no analysis. Patterns are written as `exclude`'s are. List a wrapper that
+`#include`s vendored code too: its object is the one compiled, while the
+diagnostics name the vendored file. The summary lists the files skipped,
+a `skip` that matches nothing warns, and one that covers every C file fails.
 
 ### `mutation.yml` — which changes does no test notice?
 
