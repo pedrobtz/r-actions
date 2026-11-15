@@ -81,6 +81,20 @@ jobs:
           /tmp/vendor/bin/pip install --quiet pyyaml
           PATH="/tmp/vendor/bin:$PATH" bash tests/check-vendor.sh
 
+  analyzer-skip:
+    name: analyzers' skip compiles the listed files without -fanalyzer
+    # Runs the step for real and compiles a fixture the way R's make does:
+    # a skipped file and a wrapper that #includes it report nothing, the
+    # file beside them still reports its double free.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the step on the fixture
+        run: |
+          python3 -m venv /tmp/analyzer
+          /tmp/analyzer/bin/pip install --quiet pyyaml
+          PATH="/tmp/analyzer/bin:$PATH" bash tests/check-analyzer-skip.sh
+
   alloc-interposer:
     name: alloc-failure interposer is transparent
     # The one piece of C this repository ships. It sits in a heredoc inside
