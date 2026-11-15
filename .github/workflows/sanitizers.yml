@@ -865,6 +865,8 @@ jobs:
           exit 1
 
       - uses: actions/upload-artifact@v7
+        # A diagnostic only: a full artifact quota must not fail the check.
+        continue-on-error: true
         if: always()
         with:
           name: ubsan-${{ matrix.compiler }}
@@ -1199,6 +1201,8 @@ jobs:
           exit "$status"
 
       - uses: actions/upload-artifact@v7
+        # A diagnostic only: a full artifact quota must not fail the check.
+        continue-on-error: true
         if: always()
         with:
           name: asan-${{ matrix.container }}

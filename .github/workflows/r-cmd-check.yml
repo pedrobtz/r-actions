@@ -992,6 +992,8 @@ jobs:
           echo "No warnings outside the allow-list."
 
       - uses: actions/upload-artifact@v7
+        # A diagnostic only: a full artifact quota must not fail the check.
+        continue-on-error: true
         if: failure()
         with:
           name: check-${{ matrix.container }}
@@ -1186,6 +1188,8 @@ jobs:
           echo "No warnings outside the allow-list."
 
       - uses: actions/upload-artifact@v7
+        # A diagnostic only: a full artifact quota must not fail the check.
+        continue-on-error: true
         if: failure()
         with:
           name: check-nosuggests
@@ -1359,6 +1363,8 @@ jobs:
           echo "No warnings outside the allow-list."
 
       - uses: actions/upload-artifact@v7
+        # A diagnostic only: a full artifact quota must not fail the check.
+        continue-on-error: true
         if: failure()
         with:
           name: check-nold

@@ -1022,6 +1022,8 @@ jobs:
           PY
 
       - uses: actions/upload-artifact@v7
+        # A diagnostic only: a full artifact quota must not fail the check.
+        continue-on-error: true
         if: always()
         with:
           name: fuzz-reach
@@ -1039,6 +1041,8 @@ jobs:
           key: fuzz-corpus-${{ github.repository }}-${{ inputs.harness }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - uses: actions/upload-artifact@v7
+        # A diagnostic only: a full artifact quota must not fail the check.
+        continue-on-error: true
         if: always()
         with:
           name: fuzz-findings
