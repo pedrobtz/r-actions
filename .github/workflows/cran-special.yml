@@ -459,6 +459,8 @@ jobs:
           echo "No constants finding."
 
       - uses: actions/upload-artifact@v7
+        # A diagnostic only: a full artifact quota must not fail the check.
+        continue-on-error: true
         if: failure() && steps.src.outputs.has-src == 'true'
         with:
           name: check-rcnst
@@ -597,6 +599,8 @@ jobs:
           done
 
       - uses: actions/upload-artifact@v7
+        # A diagnostic only: a full artifact quota must not fail the check.
+        continue-on-error: true
         if: failure()
         with:
           name: check-rlibro
@@ -704,6 +708,8 @@ jobs:
           cat("The reference manual is valid HTML.\n")
 
       - uses: actions/upload-artifact@v7
+        # A diagnostic only: a full artifact quota must not fail the check.
+        continue-on-error: true
         if: always()
         with:
           name: vnu

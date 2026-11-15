@@ -29,7 +29,10 @@ default 90. Artifacts count against the account's Actions storage, which is
 days. Whole check directories (`check-*`, `valgrind-check`, `check-rcnst`,
 `check-rlibro`, `arch-*`) are uploaded only when the job fails. The small
 reports (sanitizer logs, fuzz findings, rchk and analyzer output, vnu) are
-uploaded on every run. `tests/lint-workflows.py` enforces both rules.
+uploaded on every run. An upload never fails its job: no job reads
+another's artifacts, so each is there for a person to read, and when the
+storage is full anyway the check's own result stands, with the upload's
+error as an annotation. `tests/lint-workflows.py` enforces all three rules.
 
 ## Workflows
 

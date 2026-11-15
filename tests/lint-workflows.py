@@ -205,6 +205,15 @@ for path in sorted(WORKFLOWS.glob("*.yml")):
             if whole and "always()" in str(step.get("if", "")):
                 fail(name, f"job `{job}` uploads a whole check directory, "
                            f"`{with_.get('name')}`, on `always()`; use `failure()`")
+            # No job downloads an artifact: each is a diagnostic for a person
+            # to read. When the storage quota is full the upload fails, and
+            # on 2026-11-15 nine of pedrobtz/zumir#51's checks went red that
+            # way, every check itself having passed. The job's verdict is
+            # the check's; the upload's own error stays as an annotation.
+            if step.get("continue-on-error") is not True:
+                fail(name, f"job `{job}` uploads `{with_.get('name')}` without "
+                           f"`continue-on-error: true`; a full artifact quota "
+                           f"would fail a check that passed")
 
     perms = permissions_of(doc)
 
