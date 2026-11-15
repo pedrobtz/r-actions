@@ -481,9 +481,13 @@ jobs:
       # named as R's make names it, relative to src/. GCC takes the last of
       # -fanalyzer and -fno-analyzer, and a target-specific `+=` lands after
       # the global one, so the file compiles as before minus the analysis.
+      # bash, not the container's default `sh -e`: the matching reads its
+      # patterns from a here-string and the files from a process
+      # substitution, and dash rejects both ("redirection unexpected").
       - name: Turn the analyzer on
         if: steps.probe.outputs.skip == 'false'
         id: analyzer
+        shell: bash
         env:
           ANALYZER_FLAGS: ${{ inputs.analyzer-flags }}
           SKIP: ${{ inputs.skip }}

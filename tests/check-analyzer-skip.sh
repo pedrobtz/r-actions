@@ -17,7 +17,16 @@ import sys, yaml
 wf = yaml.safe_load(open(sys.argv[1]))
 step = next(s for s in wf["jobs"]["fanalyzer"]["steps"] if s.get("name") == "Turn the analyzer on")
 open(sys.argv[2], "w").write(step["run"])
+# The shell the job runs it with: a step in a container job with no
+# `shell:` gets `sh -e`, which is dash on Ubuntu, so the test must not run
+# it under bash when the workflow does not.
+open(sys.argv[2] + ".shell", "w").write(step.get("shell", "sh"))
 PY
+
+step_shell=$(cat "$work/step.sh.shell")
+# Where sh is not dash (macOS), run the default as dash when there is one.
+if [ "$step_shell" = sh ] && command -v dash > /dev/null; then step_shell=dash; fi
+echo "the step runs under: $step_shell"
 
 failed=0
 ok()   { echo "ok   $1"; }
@@ -28,7 +37,7 @@ run_step() {   # run_step DIR SKIP: leaves DIR/makevars, DIR/out.log, DIR/rc
   : > "$d/gh-output"
   local rc=0
   ( cd "$d" && R_MAKEVARS_USER="$d/makevars" GITHUB_OUTPUT="$d/gh-output" \
-      ANALYZER_FLAGS=-fanalyzer SKIP="$2" bash "$work/step.sh" > "$d/out.log" 2>&1 ) || rc=$?
+      ANALYZER_FLAGS=-fanalyzer SKIP="$2" "$step_shell" "$work/step.sh" > "$d/out.log" 2>&1 ) || rc=$?
   echo "$rc" > "$d/rc"
 }
 
