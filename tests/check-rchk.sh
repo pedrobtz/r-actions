@@ -7,7 +7,15 @@
 # Needs docker and network (the image and the packages' dependencies).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+work=$(mktemp -d)
+# The container writes root-owned files into the mounted case directories, so
+# on Linux a plain rm cannot remove them; remove them from inside the image.
+cleanup() {
+    rm -rf "$work" 2>/dev/null && return
+    docker run --rm --entrypoint sh -v "$work:/w" "$image" -c 'rm -rf /w/* /w/.[!.]*' || true
+    rm -rf "$work" || true
+}
+trap cleanup EXIT
 image=${RCHK_IMAGE:-$(python3 - "$root/.github/workflows/rchk.yml" <<'PY'
 import sys, yaml
 on = yaml.safe_load(open(sys.argv[1]))
