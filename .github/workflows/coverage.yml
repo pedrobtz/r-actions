@@ -37,6 +37,15 @@ on:
         type: string
         required: false
         default: ""
+      fail-under:
+        description: >
+          Fail the coverage job when the package's R and native coverage
+          together is below this percentage. 0, the default, never fails;
+          set it a little under the current figure, so a change that drops
+          coverage goes red instead of moving a badge.
+        type: number
+        required: false
+        default: 0
       native-exclude:
         description: >
           Paths to leave out of the native coverage report, one per line,
@@ -133,6 +142,8 @@ jobs:
       - name: Run coverage
         id: coverage
         shell: Rscript {0}
+        env:
+          COVERAGE_FAIL_UNDER: ${{ inputs.fail-under }}
         run: |
           cov <- covr::package_coverage(quiet = FALSE)
           pct <- covr::percent_coverage(cov)
@@ -155,6 +166,11 @@ jobs:
             if (pct >= 75) "#DB1" else
             if (pct >= 60) "#F73" else "#E43"
           cat(sprintf("pct=%.1f\n", pct), file = Sys.getenv("GITHUB_OUTPUT"), append = TRUE)
+          floor <- as.numeric(Sys.getenv("COVERAGE_FAIL_UNDER", "0"))
+          if (!empty && is.finite(floor) && floor > 0 && pct < floor) {
+            cat(sprintf("::error::coverage %.1f%% is below fail-under %g%%\n", pct, floor))
+            quit(status = 1)
+          }
           cat(sprintf("color=%s\n", color), file = Sys.getenv("GITHUB_OUTPUT"), append = TRUE)
 
           df <- as.data.frame(cov)
