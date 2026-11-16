@@ -1,0 +1,1 @@
+useDynLib(buggypkg, .registration = TRUE)
