@@ -24,6 +24,7 @@
 #       finding: ${{ needs.fuzz.outputs.finding }}
 #       key: ${{ needs.fuzz.outputs.finding-key }}
 #       details: ${{ needs.fuzz.outputs.report }}
+#       findings: ${{ needs.fuzz.outputs.findings }}   # with keep-going
 on:
   workflow_call:
     inputs:
@@ -69,6 +70,28 @@ on:
         type: string
         required: false
         default: ""
+      findings:
+        description: >
+          Several findings at once, as fuzz.yml's `findings` output with
+          `keep-going`: a JSON array of objects with `finding`, `key` and
+          `details`. Each is handled as `finding`, `key` and `details` would
+          be on their own -- commented on, reopened or filed -- and those
+          three inputs are then ignored. An empty array, or none, falls back
+          to them. Pass fuzz.yml's output straight through, as
+          examples/fuzz.yml does.
+        type: string
+        required: false
+        default: ""
+      max-new:
+        description: >
+          With `findings`, the most new issues one run opens. Findings past it
+          are only logged; once the ones filed have issues, a later run finds
+          them known and files the next. Without a cap, a first long run on a
+          fresh parser could open dozens at once, and a grouping mistake would
+          multiply them.
+        type: number
+        required: false
+        default: 5
 
 name: report
 
@@ -91,6 +114,8 @@ jobs:
           KEY: ${{ inputs.key }}
           DETAILS: ${{ inputs.details }}
           LABEL: ${{ inputs.label }}
+          FINDINGS: ${{ inputs.findings }}
+          MAX_NEW: ${{ inputs.max-new }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
         # Everything the caller passes arrives through the environment and is
@@ -99,84 +124,120 @@ jobs:
         run: |
           set -euo pipefail
           label=${LABEL:-$NAME}
-          key=${KEY:-$FINDING}
-
-          # Found by marker, not by title or by label alone: a finding's
-          # title is truncated, and one repository can carry several
-          # findings, and the run's own failure, under the same label.
-          if [ -n "$key" ]; then
-            id=$(printf '%s' "$key" | sha1sum | cut -c1-12)
-            marker="<!-- r-actions:report:${NAME}:${id} -->"
-          else
-            marker="<!-- r-actions:report:${NAME}:run -->"
-          fi
-
-          find_issue() {   # $1: open or closed; prints "number reason"
-            gh issue list --repo "$REPO" --label "$label" --state "$1" --limit 200 \
-              --json number,body,stateReason \
-              --jq "map(select(.body | contains(\"${marker}\"))) | .[0] // empty | \"\(.number) \(.stateReason)\""
-          }
 
           gh label create "$label" --repo "$REPO" --color B60205 \
             --description "Filed by a scheduled ${NAME} run" --force >/dev/null
 
-          open=$(find_issue open); open=${open%% *}
+          created=0
 
-          if [ "$RESULT" = success ]; then
-            # A green run proves a deterministic check is fixed. It proves
-            # nothing about a fuzzer's finding, which a later run may simply
-            # not reach again, so a finding's issue is closed by its fix.
-            if [ -z "$key" ] && [ -n "$open" ]; then
-              gh issue close "$open" --repo "$REPO" --comment "Green again on ${SHA:0:7}: ${RUN}"
-              echo "closed #${open}"
-            fi
-            exit 0
-          fi
+          # One finding: $1 its text (empty for the run itself), $2 its key,
+          # $3 the Markdown for a new issue's body, $4 whether a new issue may
+          # be opened (the max-new cap).
+          report_one() {
+            local finding=$1 key=${2:-$1} details=$3 may_create=$4
+            local id marker open closed number reason again title
 
-          again="Again on ${SHA:0:7}: ${RUN}"
-          if [ -n "$open" ]; then
-            gh issue comment "$open" --repo "$REPO" --body "$again"
-            echo "commented on #${open}"
-            exit 0
-          fi
-
-          closed=$(find_issue closed)
-          if [ -n "$closed" ]; then
-            number=${closed%% *} reason=${closed#* }
-            # Closed as not planned is a decision about this finding; a
-            # nightly run should not argue with it.
-            if [ "$reason" = NOT_PLANNED ]; then
-              echo "#${number} was closed as not planned; leaving it closed"
-              exit 0
-            fi
-            gh issue reopen "$number" --repo "$REPO" \
-              --comment "Found again after it was closed. ${again}"
-            echo "reopened #${number}"
-            exit 0
-          fi
-
-          if [ -n "$FINDING" ]; then
-            title="${NAME}: ${FINDING}"
-          else
-            title="Scheduled ${NAME} fails"
-          fi
-          title=$(printf '%s' "$title" | cut -c1-120)
-          # The marker goes first, so that trimming to GitHub's limit below
-          # can never cut it off.
-          {
-            echo "$marker"
-            echo "Scheduled \`${NAME}\` ended \`${RESULT}\` on ${SHA:0:7}: ${RUN}"
-            if [ -n "$DETAILS" ]; then
-              echo
-              printf '%s\n' "$DETAILS"
-            fi
-            echo
+            # Found by marker, not by title or by label alone: a finding's
+            # title is truncated, and one repository can carry several
+            # findings, and the run's own failure, under the same label.
             if [ -n "$key" ]; then
-              echo "Filed by a scheduled run, which comments here each time it finds this again. Close it with the fix: a green run is no proof a fuzzer's finding is gone, so nothing closes it automatically. Closed as not planned, it stays closed."
+              id=$(printf '%s' "$key" | sha1sum | cut -c1-12)
+              marker="<!-- r-actions:report:${NAME}:${id} -->"
             else
-              echo "Filed by a scheduled run, which comments here at each further failure and closes this on the next green run."
+              marker="<!-- r-actions:report:${NAME}:run -->"
             fi
-          } > body.md
-          # An issue body holds 65536 characters.
-          head -c 60000 body.md > body.trim.md
-          gh issue create --repo "$REPO" --label "$label" --title "$title" --body-file body.trim.md
+
+            find_issue() {   # $1: open or closed; prints "number reason"
+              gh issue list --repo "$REPO" --label "$label" --state "$1" --limit 200 \
+                --json number,body,stateReason \
+                --jq "map(select(.body | contains(\"${marker}\"))) | .[0] // empty | \"\(.number) \(.stateReason)\""
+            }
+
+            open=$(find_issue open); open=${open%% *}
+
+            if [ "$RESULT" = success ]; then
+              # A green run proves a deterministic check is fixed. It proves
+              # nothing about a fuzzer's finding, which a later run may simply
+              # not reach again, so a finding's issue is closed by its fix.
+              if [ -z "$key" ] && [ -n "$open" ]; then
+                gh issue close "$open" --repo "$REPO" --comment "Green again on ${SHA:0:7}: ${RUN}"
+                echo "closed #${open}"
+              fi
+              return 0
+            fi
+
+            again="Again on ${SHA:0:7}: ${RUN}"
+            if [ -n "$open" ]; then
+              gh issue comment "$open" --repo "$REPO" --body "$again"
+              echo "commented on #${open}"
+              return 0
+            fi
+
+            closed=$(find_issue closed)
+            if [ -n "$closed" ]; then
+              number=${closed%% *} reason=${closed#* }
+              # Closed as not planned is a decision about this finding; a
+              # nightly run should not argue with it.
+              if [ "$reason" = NOT_PLANNED ]; then
+                echo "#${number} was closed as not planned; leaving it closed"
+                return 0
+              fi
+              gh issue reopen "$number" --repo "$REPO" \
+                --comment "Found again after it was closed. ${again}"
+              echo "reopened #${number}"
+              return 0
+            fi
+
+            if [ "$may_create" != true ]; then
+              echo "not filed (max-new reached): ${finding}"
+              return 0
+            fi
+
+            if [ -n "$finding" ]; then
+              title="${NAME}: ${finding}"
+            else
+              title="Scheduled ${NAME} fails"
+            fi
+            title=$(printf '%s' "$title" | cut -c1-120)
+            # The marker goes first, so that trimming to GitHub's limit below
+            # can never cut it off.
+            {
+              echo "$marker"
+              echo "Scheduled \`${NAME}\` ended \`${RESULT}\` on ${SHA:0:7}: ${RUN}"
+              if [ -n "$details" ]; then
+                echo
+                printf '%s\n' "$details"
+              fi
+              echo
+              if [ -n "$key" ]; then
+                echo "Filed by a scheduled run, which comments here each time it finds this again. Close it with the fix: a green run is no proof a fuzzer's finding is gone, so nothing closes it automatically. Closed as not planned, it stays closed."
+              else
+                echo "Filed by a scheduled run, which comments here at each further failure and closes this on the next green run."
+              fi
+            } > body.md
+            # An issue body holds 65536 characters.
+            head -c 60000 body.md > body.trim.md
+            gh issue create --repo "$REPO" --label "$label" --title "$title" --body-file body.trim.md
+            created=$((created + 1))
+          }
+
+          # Several findings (fuzz.yml keep-going): each handled on its own,
+          # new issues capped by max-new. A green run has no findings, and
+          # closes nothing a finding filed.
+          n=0
+          if [ -n "${FINDINGS:-}" ]; then
+            n=$(printf '%s' "$FINDINGS" | jq 'length')
+          fi
+          if [ "$n" -gt 0 ] && [ "$RESULT" != success ]; then
+            for i in $(seq 0 $((n - 1))); do
+              f=$(printf '%s' "$FINDINGS" | jq -r ".[$i].finding // \"\"")
+              k=$(printf '%s' "$FINDINGS" | jq -r ".[$i].key // \"\"")
+              d=$(printf '%s' "$FINDINGS" | jq -r ".[$i].details // \"\"")
+              may=false
+              [ "$created" -lt "${MAX_NEW:-5}" ] && may=true
+              report_one "$f" "$k" "$d" "$may"
+            done
+            exit 0
+          fi
+
+          report_one "$FINDING" "$KEY" "$DETAILS" true

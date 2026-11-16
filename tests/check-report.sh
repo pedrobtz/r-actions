@@ -16,6 +16,8 @@ wf, out = sys.argv[1], sys.argv[2]
 fuzz = yaml.safe_load(open(f"{wf}/fuzz.yml"))
 step = next(s for s in fuzz["jobs"]["fuzz"]["steps"] if s.get("id") == "describe")
 open(f"{out}/describe.sh", "w").write(step["run"])
+triage = next(s for s in fuzz["jobs"]["fuzz"]["steps"] if s.get("id") == "triage")
+open(f"{out}/triage.sh", "w").write(triage["run"])
 report = yaml.safe_load(open(f"{wf}/report.yml"))
 open(f"{out}/report.sh", "w").write(report["jobs"]["report"]["steps"][0]["run"])
 PY
@@ -93,6 +95,20 @@ LOG
 [ "$(output "$d" finding)" = "the fuzz target exited 1" ] && ok "an unrecognised log still names something" \
   || bad "fallback: [$(output "$d" finding)]"
 
+# An interceptor frame prints the binary's offset and BuildId, which change
+# with every build; two builds of the same bug must share a key.
+for b in 5dfc5075cb1f298b543ae56bd5e12c427d398545 d8d7835fa6578dd9cbfc4902cc744b4c6c95c01f; do
+  d=$(fixture "buildid-$b" <<LOG
+==9==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60
+SUMMARY: AddressSanitizer: heap-buffer-overflow (/tmp/tmp.UOx/fuzz-target+0x1042fd) (BuildId: $b) in __asan_memcpy
+LOG
+)
+  describe "$d"
+done
+k1=$(output "$work/buildid-5dfc5075cb1f298b543ae56bd5e12c427d398545" finding-key)
+k2=$(output "$work/buildid-d8d7835fa6578dd9cbfc4902cc744b4c6c95c01f" finding-key)
+[ "$k1" = "$k2" ] && [[ "$k1" != *BuildId* ]] && ok "an interceptor frame's BuildId does not change the key" || bad "BuildId key: [$k1] vs [$k2]"
+
 # --- report -----------------------------------------------------------------
 
 # `gh` answers issue list from $ISSUES (one "state number reason body" a line)
@@ -131,5 +147,99 @@ report "another finding gets its own issue"     failure "$F" "open 7 null <!--r-
 report "green leaves a finding's issue open"    success "$F" "open 7 null <!--r-actions:report:fuzz:$id-->"         '^$'
 report "a failure without a finding: one issue" failure ""   ""                                                     '^issue create .*--title Scheduled fuzz fails'
 report "green closes the run's issue"           success ""   "open 9 null <!--r-actions:report:fuzz:run-->"         '^issue close 9 '
+
+# --- keep-going: triage -----------------------------------------------------
+
+# A stand-in fuzz target: it prints the log the input's first byte names and
+# fails, or passes for 'D' (an input that does not reproduce). A and B are the
+# same bug with its line moved; C is UBSan; E is a leak.
+t="$work/triage"; mkdir -p "$t"
+cat > "$t/fuzz-target" <<'TARGET'
+#!/usr/bin/env bash
+in="${@: -1}"
+case "$(head -c1 "$in")" in
+  A) echo "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60"
+     echo "SUMMARY: AddressSanitizer: heap-buffer-overflow /home/runner/work/pkg/pkg/src/vendor/lib/parse.c:10:5 in parse_header"; exit 1 ;;
+  B) echo "==7==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x61"
+     echo "SUMMARY: AddressSanitizer: heap-buffer-overflow /home/runner/work/pkg/pkg/src/vendor/lib/parse.c:12:9 in parse_header"; exit 1 ;;
+  C) echo "/home/runner/work/pkg/pkg/src/vendor/lib/shift.c:3:7: runtime error: shift exponent 93 is too large for 32-bit type 'int'"
+     echo "SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /home/runner/work/pkg/pkg/src/vendor/lib/shift.c:3:7 "; exit 1 ;;
+  E) echo "==3==ERROR: LeakSanitizer: detected memory leaks"
+     echo "SUMMARY: AddressSanitizer: 48 byte(s) leaked in 1 allocation(s)."; exit 1 ;;
+  *) exit 0 ;;
+esac
+TARGET
+chmod +x "$t/fuzz-target"
+printf 'A1' > "$t/crash-aaa"; printf 'B22' > "$t/crash-bbb"; printf 'C' > "$t/crash-ccc"
+printf 'D' > "$t/crash-ddd"; printf 'E' > "$t/leak-eee"
+( cd "$t" && env GITHUB_WORKSPACE=/home/runner/work/pkg/pkg GITHUB_OUTPUT="$t/out" \
+    GITHUB_STEP_SUMMARY="$t/summary" HARNESS=tools/fuzz/fuzz_x.c CFLAGS_IN="-g -O1" \
+    SANITIZERS=fuzzer,address,undefined EXTRA="" EMBED_R=false MAX_FINDINGS=20 \
+    RUN_URL=https://run SHA=0123456789abcdef bash "$work/triage.sh" >/dev/null )
+findings=$(awk '/^findings<</{on=1; next} on && /^EOF_/{exit} on' "$t/out")
+n=$(printf '%s' "$findings" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+[ "$n" = 3 ] && ok "keep-going: five inputs, one not reproducing, make three findings" || bad "keep-going: $n findings"
+counts=$(printf '%s' "$findings" | python3 -c 'import json,sys; print(" ".join(str(f["count"]) for f in json.load(sys.stdin)))')
+[ "$counts" = "2 1 1" ] && ok "keep-going: the same bug on two lines is one finding, listed first" || bad "keep-going counts: [$counts]"
+grep -q 'crash-ddd' "$t/summary" && ok "keep-going: an input that does not reproduce is named, not filed" || bad "keep-going: the flaky input is missing"
+grep -q '| 1 | 2 |' "$t/summary" && ok "keep-going: the summary is a table, most frequent first" || bad "keep-going: no table in the summary"
+
+# The key must match the single-finding describe step's for the same log, or
+# an issue filed in one mode is filed again by the other.
+d=$(fixture parity <<'LOG'
+==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60
+SUMMARY: AddressSanitizer: heap-buffer-overflow /home/runner/work/pkg/pkg/src/vendor/lib/parse.c:10:5 in parse_header
+LOG
+)
+describe "$d"; single=$(output "$d" finding-key)
+multi=$(printf '%s' "$findings" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["key"])')
+[ "$single" = "$multi" ] && ok "keep-going: the key matches the describe step's" || bad "key parity: [$single] vs [$multi]"
+d=$(fixture parity-ub <<'LOG'
+/home/runner/work/pkg/pkg/src/vendor/lib/shift.c:3:7: runtime error: shift exponent 93 is too large for 32-bit type 'int'
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /home/runner/work/pkg/pkg/src/vendor/lib/shift.c:3:7 
+LOG
+)
+describe "$d"; single=$(output "$d" finding-key)
+multi=$(printf '%s' "$findings" | python3 -c 'import json,sys; print([f["key"] for f in json.load(sys.stdin) if "Undefined" in f["key"]][0])')
+[ "$single" = "$multi" ] && ok "keep-going: a UBSan key matches the describe step's" || bad "UBSan key parity: [$single] vs [$multi]"
+top=$(sed -n 's/^finding=//p' "$t/out")
+[ "$top" = "AddressSanitizer: heap-buffer-overflow src/vendor/lib/parse.c:10:5 in parse_header" ] \
+  && ok "keep-going: finding names the most frequent group" || bad "keep-going top finding: [$top]"
+
+# --- keep-going: report -----------------------------------------------------
+
+# This gh answers from $ISSUES by the marker in its --jq query, so one run
+# can ask about several findings.
+cat > "$work/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+if [ "$1 $2" = "issue list" ]; then
+  state=""; q=""
+  while [ $# -gt 0 ]; do
+    case "$1" in --state) state=$2 ;; --jq) q=$2 ;; esac; shift
+  done
+  want=$(printf '%s' "$q" | grep -o 'r-actions:report:[^ ]*:[0-9a-f]*' | head -n1)
+  printf '%s\n' "$ISSUES" | while read -r s n r b; do
+    [ "$s" = "$state" ] && [[ "$b" == *"$want"* ]] && { echo "$n $r"; break; }
+  done
+  exit 0
+fi
+echo "$*" >> "$CALLS"
+STUB
+chmod +x "$work/bin/gh"
+
+report_many() {   # $1 name, $2 max-new, $3 issues, $4 expected calls (regex, one line each, joined by ;)
+  local calls="$work/calls"; : > "$calls"
+  env PATH="$work/bin:$PATH" CALLS="$calls" ISSUES="$3" GH_TOKEN=x REPO=o/r NAME=fuzz \
+    RESULT=failure FINDING="" KEY="" DETAILS="" LABEL="" FINDINGS="$findings" MAX_NEW="$2" \
+    RUN=https://run SHA=0123456789 bash -c 'cd "$1" && bash report.sh' _ "$work" >/dev/null
+  local got; got=$(grep -v "^label create" "$calls" | sed -E 's/^(issue [a-z]+) ([0-9]+)?.*/\1 \2/' | tr '\n' ';')
+  if [[ "$got" =~ $4 ]]; then ok "$1"; else bad "$1: got [$got]"; fi
+}
+k2=$(printf '%s' "$findings" | python3 -c 'import json,sys; print(json.load(sys.stdin)[1]["key"])')
+id2=$(printf '%s' "$k2" | sha1sum | cut -c1-12)
+report_many "keep-going: each finding filed once, a known one commented" 5 \
+  "open 4 null <!--r-actions:report:fuzz:$id2-->" '^issue create ;issue comment 4;issue create ;$'
+report_many "keep-going: max-new caps the new issues, not the comments" 1 \
+  "open 4 null <!--r-actions:report:fuzz:$id2-->" '^issue create ;issue comment 4;$'
 
 exit $failed

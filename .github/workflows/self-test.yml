@@ -150,6 +150,23 @@ jobs:
           /tmp/native/bin/pip install --quiet pyyaml
           PATH="/tmp/native/bin:$PATH" bash tests/check-native-reports.sh
 
+  keep-going:
+    name: fuzz keep-going reports every distinct finding of one run
+    # Fork mode exits 0 whatever it found, so a mistake here turns a long
+    # run's findings into a green job; and a grouping mistake files one bug
+    # as many issues, or many bugs as one. A target with two known bugs
+    # catches both.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install clang
+        run: sudo apt-get update -q && sudo apt-get install -y -q clang
+      - name: Fuzz a two-bug target in keep-going mode and triage it
+        run: |
+          python3 -m venv /tmp/keep-going
+          /tmp/keep-going/bin/pip install --quiet pyyaml
+          PATH="/tmp/keep-going/bin:$PATH" bash tests/check-keep-going.sh
+
   alloc-sweep:
     name: alloc-failure sweep fails on the package's crashes only
     # A wrong answer here either hides a package crash under

@@ -1281,6 +1281,52 @@ The reporting is a separate workflow because it writes issues: asking for
 does not grant it. `report.yml` works the same way for any scheduled check,
 with `finding` left empty.
 
+#### Keep going: every distinct finding of a long run
+
+By default the fuzzer stops at its first crash. That is right for a pull
+request, which wants a fast and unambiguous red, and wrong for a long
+scheduled run: a parser with many independent bugs then surfaces one a night.
+`keep-going: true` runs libFuzzer in fork mode (`-fork=N` with
+`-ignore_crashes`, `-ignore_ooms` and `-ignore_timeouts`), so a crash replaces
+its worker instead of ending the run, and every crashing input is saved. A
+triage step then replays each saved input, drops the ones that do not
+reproduce, and groups the rest by the same `finding-key` the single-finding
+mode computes, so an issue filed in one mode is matched in the other.
+
+The job summary gets a table, one row per distinct finding, most frequent
+first, with how many inputs reproduce it and the smallest of them. The
+`findings` output carries the same as JSON, each with the Markdown `report`
+would have; `finding`, `finding-key` and `report` describe the most frequent
+group. `report.yml` takes the list as `findings` and keeps one issue per
+entry, exactly as for a single finding, opening at most `max-new` (default 5)
+new issues a run, so that a first long run on a fresh parser does not open
+dozens at once. The rest are filed by later runs, once the first have issues.
+
+```yaml
+  fuzz:
+    uses: pedrobtz/r-actions/.github/workflows/fuzz.yml@v1
+    with:
+      harness: tools/fuzz/harness.c
+      max-total-time: ${{ github.event_name == 'schedule' && 1800 || 120 }}
+      keep-going: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+
+  report:
+    # ... as above, plus:
+    with:
+      findings: ${{ needs.fuzz.outputs.findings }}
+```
+
+Grouping is by the sanitizer's SUMMARY: the error kind and the frame it
+names, with line numbers, counts, directories and an interceptor frame's
+build offset and BuildId taken out. It can merge two bugs that fail in the
+same function and split one bug that fails in two; the table shows each
+group's inputs, so a split or a merge is visible there. Out-of-memory inputs
+and timeouts are reproduced and listed like crashes. Fixing one bug often
+makes another reachable, so even a run that reports everything is a round,
+not the last one: data.sketches' 2026-11 hardening took four long runs, with
+coverage rising from 3,414 to 4,228 edges and about 20, 12, 3 and then no
+distinct findings.
+
 `embed-r: true` builds the target against an embedded R, for a harness whose
 code under test calls R's API (serialization hooks, SEXP glue): R is installed,
 the target is compiled with `R CMD config --cppflags` and linked to libR alone, and
