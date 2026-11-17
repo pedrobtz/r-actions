@@ -27,6 +27,9 @@ jobs:
       seed-corpus: tests/yaml-test-suite
       dictionary: tools/fuzz/yaml.dict
       max-total-time: ${{ github.event_name == 'schedule' && 1800 || 120 }}
+      # The long run keeps going after a finding and reports every distinct
+      # one; a pull request stops at the first, for a fast red.
+      keep-going: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
 
   # A red scheduled run otherwise notifies only whoever last edited the cron
   # line. This files one issue per distinct finding, labelled fuzz, with the
@@ -46,3 +49,6 @@ jobs:
       finding: ${{ needs.fuzz.outputs.finding }}
       key: ${{ needs.fuzz.outputs.finding-key }}
       details: ${{ needs.fuzz.outputs.report }}
+      # With keep-going: one issue per distinct finding, at most max-new new
+      # ones a run (default 5).
+      findings: ${{ needs.fuzz.outputs.findings }}

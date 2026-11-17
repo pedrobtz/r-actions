@@ -159,6 +159,43 @@ on:
         type: string
         required: false
         default: ""
+      keep-going:
+        description: >
+          Keep fuzzing after a finding, and report every distinct one. The
+          default stops at the first crash, which is right for a pull
+          request: a fast, unambiguous red. A long scheduled run that stops at
+          its first finding reports one bug a night, and a parser with many
+          independent bugs takes as many nights to surface them.
+
+          With this set, libFuzzer runs in fork mode (`-fork`, with
+          `-ignore_crashes`, `-ignore_ooms` and `-ignore_timeouts`) and saves
+          every crashing input. A triage step then replays each one, drops
+          those that do not reproduce, and groups the rest by the same
+          finding key the single-finding mode uses, so issues match across
+          the two. The groups go to the job summary as a table and to the
+          `findings` output, which report.yml files one issue each. Set it for
+          scheduled and dispatched runs only (examples/fuzz.yml shows the
+          expression), and leave pull requests on the default.
+
+          Fixing one bug often makes another reachable, so even a run that
+          reports everything is a round, not the last one.
+        type: boolean
+        required: false
+        default: false
+      keep-going-jobs:
+        description: >
+          Worker processes for `keep-going` (libFuzzer's `-fork=N`). Two
+          fill an ubuntu-latest runner's two cores.
+        type: number
+        required: false
+        default: 2
+      max-findings:
+        description: >
+          With `keep-going`, the most groups `findings` and the summary list,
+          the most frequent first. The rest are counted, not listed.
+        type: number
+        required: false
+        default: 20
       cache-corpus:
         description: >
           Carry the corpus between runs through the actions cache. This is
@@ -252,6 +289,15 @@ on:
           command that rebuilds the target, and the crashing input itself
           when it is small, since the artifact holding it expires.
         value: ${{ jobs.fuzz.outputs.report }}
+      findings:
+        description: >
+          With `keep-going`: a JSON array with one object per distinct
+          finding, most frequent first, each with `finding`, `key`, `count`,
+          `inputs` (a few of the artifact's file names) and `details`
+          (Markdown, as `report`). report.yml takes it as `findings`. `[]`
+          otherwise, and when nothing reproduced. `finding`, `finding-key`
+          and `report` then describe the most frequent group.
+        value: ${{ jobs.fuzz.outputs.findings }}
 
 name: fuzz
 
@@ -532,9 +578,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     outputs:
-      finding: ${{ steps.describe.outputs.finding }}
-      finding-key: ${{ steps.describe.outputs.finding-key }}
-      report: ${{ steps.describe.outputs.report }}
+      finding: ${{ steps.describe.outputs.finding || steps.triage.outputs.finding }}
+      finding-key: ${{ steps.describe.outputs.finding-key || steps.triage.outputs.finding-key }}
+      report: ${{ steps.describe.outputs.report || steps.triage.outputs.report }}
+      findings: ${{ steps.triage.outputs.findings || '[]' }}
 
     # Job-wide, so the merge replays the corpus under the same rules the
     # fuzzing found it under.
@@ -746,9 +793,17 @@ jobs:
           MAX_TIME: ${{ needs.changes.outputs.profile == 'quick' && inputs.quick-max-total-time || inputs.max-total-time }}
           EMBED_R: ${{ inputs.embed-r }}
           EXTRA: ${{ inputs.libfuzzer-args }}
+          KEEP_GOING: ${{ inputs.keep-going }}
+          JOBS: ${{ inputs.keep-going-jobs }}
         run: |
           set -eu
           args="-max_total_time=${MAX_TIME} -print_final_stats=1"
+          # Fork mode is what lets a crash not end the run: each worker that
+          # dies is replaced, and its input is saved as crash-* like any
+          # other. Out-of-memory inputs and timeouts are kept the same way.
+          if [ "$KEEP_GOING" = true ]; then
+            args="${args} -fork=${JOBS} -ignore_crashes=1 -ignore_ooms=1 -ignore_timeouts=1"
+          fi
           # an embedded R's heap outlives each input by design
           if [ "$EMBED_R" = true ]; then args="${args} -detect_leaks=0"; fi
           if [ -n "$DICT" ]; then
@@ -775,10 +830,20 @@ jobs:
           ./fuzz-target corpus $args $EXTRA 2>&1 | tee fuzz.log
           status=${PIPESTATUS[0]}
           set -e
+          # Fork mode with the ignore flags exits 0 whatever it found, so in
+          # that mode a saved input is what makes the run a failure.
+          if [ "$KEEP_GOING" = true ] && [ "$status" -eq 0 ] \
+             && ls crash-* leak-* timeout-* oom-* >/dev/null 2>&1; then
+            status=1
+          fi
           echo "status=${status}" >> "$GITHUB_OUTPUT"
 
           if [ "$status" -ne 0 ]; then
-            echo "::error::the fuzzer found a crashing input; see the fuzz-findings artifact"
+            if [ "$KEEP_GOING" = true ]; then
+              echo "::error::the fuzzer saved $(ls -1 crash-* leak-* timeout-* oom-* 2>/dev/null | wc -l | tr -d ' ') input(s); the triage step groups them"
+            else
+              echo "::error::the fuzzer found a crashing input; see the fuzz-findings artifact"
+            fi
             ls -la crash-* leak-* timeout-* oom-* 2>/dev/null || true
             exit 1
           fi
@@ -792,7 +857,7 @@ jobs:
       # it on recorded logs.
       - name: Describe the finding
         id: describe
-        if: failure() && steps.run.outputs.status != '' && steps.run.outputs.status != '0'
+        if: failure() && !inputs.keep-going && steps.run.outputs.status != '' && steps.run.outputs.status != '0'
         env:
           HARNESS: ${{ inputs.harness }}
           CFLAGS_IN: ${{ inputs.cflags }}
@@ -817,7 +882,11 @@ jobs:
           case "$summary" in
             UndefinedBehaviorSanitizer:*) [ -z "$ub" ] || finding="${summary% } (${ub})" ;;
           esac
-          finding=$(printf '%s' "$finding" | tr -s ' ' | cut -c1-200)
+          # A frame in a sanitizer interceptor (__asan_memcpy, say) is printed
+          # as the binary's path, offset and BuildId, a hash that changes with
+          # every build: kept, it would make each night's run a new finding.
+          finding=$(printf '%s' "$finding" | sed -E 's/ ?\(BuildId: [0-9a-f]+\)//g; s/\+0x[0-9a-f]+//g' \
+                    | tr -s ' ' | cut -c1-200)
 
           # Line and column numbers move with any edit above the bug, and
           # leak sizes and memory figures change from run to run; neither
@@ -875,6 +944,154 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           cat finding.md >> "$GITHUB_STEP_SUMMARY"
           echo "finding: ${finding}"
+
+      # keep-going's report. Fork mode saves every crashing input, so a long
+      # run can leave hundreds, nearly all of them a handful of bugs found
+      # again. This replays each one, keeps those that reproduce, and groups
+      # them by the key the describe step above computes for a single
+      # finding -- the same text, derived the same way, so that an issue
+      # filed in either mode is matched in the other. tests/check-report.sh
+      # holds the two to that, and runs this on recorded fixtures.
+      - name: Triage the findings
+        id: triage
+        if: failure() && inputs.keep-going && steps.run.outputs.status != '' && steps.run.outputs.status != '0'
+        env:
+          HARNESS: ${{ inputs.harness }}
+          CFLAGS_IN: ${{ inputs.cflags }}
+          SANITIZERS: ${{ inputs.sanitizers }}
+          EXTRA: ${{ inputs.libfuzzer-args }}
+          EMBED_R: ${{ inputs.embed-r }}
+          MAX_FINDINGS: ${{ inputs.max-findings }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, glob, json, os, re, secrets, shlex, subprocess
+          from collections import OrderedDict
+
+          ws = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
+          harness = os.environ["HARNESS"]
+          sha = os.environ["SHA"]
+          run_url = os.environ["RUN_URL"]
+          extra = shlex.split(os.environ.get("EXTRA", ""))
+          if os.environ.get("EMBED_R") == "true":
+              extra.append("-detect_leaks=0")
+          limit = int(os.environ.get("MAX_FINDINGS") or 20)
+
+          def rel(text):
+              return text.replace(ws + "/", "").replace("\r", "")
+
+          # The describe step's rules, line for line: the SUMMARY, with UBSan's
+          # runtime error added; else the first ERROR line; else the status.
+          def describe(log, status):
+              lines = log.splitlines()
+              summary = next((rel(l[len("SUMMARY: "):]) for l in lines if l.startswith("SUMMARY: ")), "")
+              ub = next((rel(l.split("runtime error: ", 1)[1]) for l in lines if "runtime error: " in l), "")
+              if not summary:
+                  m = next((re.search(r"==[0-9]+== ?ERROR: (.*)", l) for l in lines
+                            if re.search(r"==[0-9]+== ?ERROR: ", l)), None)
+                  summary = rel(m.group(1)) if m else ""
+              if not summary:
+                  summary = f"the fuzz target exited {status}"
+              finding = summary
+              if summary.startswith("UndefinedBehaviorSanitizer:") and ub:
+                  finding = (summary[:-1] if summary.endswith(" ") else summary) + f" ({ub})"
+              # As the describe step: an interceptor frame's offset and BuildId
+              # change with every build.
+              finding = re.sub(r" ?\(BuildId: [0-9a-f]+\)", "", finding)
+              finding = re.sub(r"\+0x[0-9a-f]+", "", finding)
+              finding = re.sub(r" +", " ", finding)[:200]
+              key = f"{harness} {finding}"
+              key = re.sub(r"[^ ():]*/", "", key)
+              key = re.sub(r":[0-9]+(:[0-9]+)?", "", key)
+              key = re.sub(r"[0-9]+", "N", key)
+              return finding, key
+
+          def excerpt(log):
+              out, on = [], False
+              for l in log.splitlines():
+                  if re.search(r"==[0-9]+== ?ERROR|runtime error:|^ERROR: libFuzzer", l):
+                      on = True
+                  if on and re.match(r"Shadow bytes around|SUMMARY: |MS: ", l):
+                      break
+                  if on:
+                      out.append(rel(l).replace("```", "` ` `"))
+                      if len(out) == 40:
+                          break
+              return "\n".join(out)
+
+          sources = ""
+          if os.path.exists("sources.txt"):
+              sources = " ".join(open("sources.txt").read().split()) + " "
+
+          artifacts = sorted(set(glob.glob("crash-*") + glob.glob("leak-*") +
+                                 glob.glob("timeout-*") + glob.glob("oom-*")))
+          groups, flaky = OrderedDict(), []
+          for art in artifacts:
+              # A crash, leak or out-of-memory input fails on its own; a
+              # timeout needs a bound, which the fuzzer's default replays with.
+              try:
+                  proc = subprocess.run(["./fuzz-target", *extra, art], capture_output=True,
+                                        text=True, errors="replace", timeout=300)
+                  status, log = proc.returncode, proc.stdout + proc.stderr
+              except subprocess.TimeoutExpired as e:
+                  status = 124
+                  log = (e.stdout or b"").decode("utf-8", "replace") + (e.stderr or b"").decode("utf-8", "replace")
+                  log += "\nthe input did not finish in 300 s on replay"
+              if status == 0:
+                  flaky.append(art)
+                  continue
+              finding, key = describe(log, status)
+              g = groups.setdefault(key, {"finding": finding, "key": key, "inputs": [], "log": log})
+              g["inputs"].append(art)
+
+          ranked = sorted(groups.values(), key=lambda g: -len(g["inputs"]))
+          findings = []
+          for g in ranked[:limit]:
+              sample = min(g["inputs"], key=os.path.getsize)  # the smallest input
+              ex = excerpt(g["log"])
+              md = [f"**{g['finding']}**", "",
+                    f"Found by `{harness}` on {sha[:7]}: {run_url}",
+                    f"{len(g['inputs'])} input(s) in that run's `fuzz-findings` artifact reproduce it, "
+                    f"which is kept for 7 days; the smallest is `{sample}`."]
+              if ex:
+                  md += ["", "```text", ex, "```"]
+              md += ["", "Rebuild the target and replay the input:", "", "```sh",
+                     f"clang {os.environ.get('CFLAGS_IN', '')} -fsanitize={os.environ.get('SANITIZERS', '')} {harness} {sources}-o fuzz-target",
+                     f"ASAN_OPTIONS={os.environ.get('ASAN_OPTIONS', '')} UBSAN_OPTIONS={os.environ.get('UBSAN_OPTIONS', '')} ./fuzz-target {sample}",
+                     "```"]
+              if os.path.getsize(sample) <= 4096:
+                  md += ["", f"<details><summary>The input, base64 (`base64 -d > {sample}`)</summary>", "",
+                         "```text", base64.encodebytes(open(sample, "rb").read()).decode().rstrip(), "```",
+                         "", "</details>"]
+              findings.append({"finding": g["finding"], "key": g["key"], "count": len(g["inputs"]),
+                               "inputs": g["inputs"][:5], "details": "\n".join(md)[:12000]})
+
+          summary = ["### Fuzz findings", "",
+                     f"{len(artifacts)} saved input(s): {sum(len(g['inputs']) for g in ranked)} reproduce, "
+                     f"in {len(ranked)} distinct finding(s); {len(flaky)} did not reproduce on replay.", ""]
+          if ranked:
+              summary += ["| # | Inputs | Finding | Smallest input |", "|---:|---:|---|---|"]
+              for i, f in enumerate(findings, 1):
+                  small = min(groups[f["key"]]["inputs"], key=os.path.getsize)
+                  summary.append(f"| {i} | {f['count']} | {f['finding'].replace('|', '/')} | `{small}` |")
+              if len(ranked) > limit:
+                  summary += ["", f"{len(ranked) - limit} more finding(s), less frequent, are not listed (`max-findings`)."]
+          if flaky:
+              summary += ["", "Not reproduced on replay (often a leak or out-of-memory that depends on what the worker ran before): "
+                          + ", ".join(f"`{a}`" for a in flaky[:10]) + (" ..." if len(flaky) > 10 else "")]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write("\n".join(summary) + "\n")
+          print("\n".join(summary))
+
+          top = findings[0] if findings else {"finding": "", "key": "", "details": ""}
+          eof = "EOF_" + secrets.token_hex(8)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"finding={top['finding']}\nfinding-key={top['key']}\n")
+              fh.write(f"report<<{eof}\n{top['details']}\n{eof}\n")
+              fh.write(f"findings<<{eof}\n{json.dumps(findings)}\n{eof}\n")
+          PY
 
       # Merged down to the inputs that still add coverage before it is
       # saved. Without this every run's new inputs were kept forever, and the
