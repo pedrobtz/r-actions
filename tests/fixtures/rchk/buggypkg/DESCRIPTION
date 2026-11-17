@@ -1,0 +1,6 @@
+Package: buggypkg
+Version: 0.0.1
+Title: Has a PROTECT Bug
+Description: Allocates while an allocation is unprotected.
+License: MIT
+Authors@R: person("A", "B", role = c("aut", "cre"), email = "a@b.c")

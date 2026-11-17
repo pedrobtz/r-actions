@@ -1,6 +1,20 @@
 on:
   workflow_call:
     inputs:
+      image:
+        description: >
+          The rchk image. The default is R-hub's, rebuilt daily on current
+          R-devel with rchk's maintained line (LLVM 21, Ubuntu 26.04):
+          kalibera/rchk:latest, used before, was last built on 2026-01-09
+          and could not compile a package linking cpp11 0.5.5, whose
+          R_getRegisteredNamespace() call needs a later R-devel -- so it
+          analysed nothing for those packages (pedrobtz/packages#219). The
+          job records the image's digest and R-devel revision in its
+          summary. The image must run `r-check` on the tarballs in /check,
+          as R-hub's does.
+        type: string
+        required: false
+        default: ghcr.io/r-hub/containers/rchk:latest
       timeout-minutes:
         description: >
           Job timeout. Without one, a hung pull or analysis holds the runner
@@ -113,7 +127,7 @@ on:
           a system library -- GMP, say -- therefore fails its own configure
           inside the image and is never analysed. Each docker run starts a
           fresh container, so the packages are baked into a local image
-          built on `kalibera/rchk:latest`, and every run in the job uses it.
+          built on the `image`, and every run in the job uses it.
 
               system-packages: libgmp-dev
         type: string
@@ -407,6 +421,25 @@ jobs:
       - name: Build source tarball
         run: R CMD build --no-build-vignettes --no-manual .
 
+      # Which R-devel and which build of the image analysed the package, for
+      # the summary and for an assurance file's rchk row.
+      - name: Pull the image and record what it is
+        env:
+          IMAGE: ${{ inputs.image }}
+        run: |
+          set -eu
+          docker pull --quiet "$IMAGE"
+          digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE" 2>/dev/null || echo "$IMAGE")
+          rrev=$(docker run --rm --entrypoint R "$IMAGE" -q -s -e 'cat(R.version[["svn rev"]], R.version$version.string)' 2>/dev/null || echo unknown)
+          echo "RCHK_IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+          {
+            echo "## rchk image"
+            echo
+            echo "- image: \`${digest}\`"
+            echo "- R: r${rrev}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "rchk image ${digest}, R r${rrev}"
+
       # First, so that every docker run below -- the GitHub packages' install
       # included -- happens in the image that has them. A container is thrown
       # away with --rm, so installing into one would be lost by the next.
@@ -432,7 +465,7 @@ jobs:
           dir="$RUNNER_TEMP/rchk-image"
           mkdir -p "$dir"
           cat > "$dir/Dockerfile" <<EOF_DOCKERFILE
-          FROM kalibera/rchk:latest
+          FROM ${RCHK_IMAGE}
           RUN apt-get update \\
            && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $pkgs \\
            && rm -rf /var/lib/apt/lists/*
@@ -443,7 +476,7 @@ jobs:
       # Before the analysis, so that the image finds them installed. Cloned
       # outside the workspace: nothing here may ride along into the
       # package's own tarball.
-      - name: Install GitHub packages into the image
+      - name: Build the GitHub packages for the analysis run
         if: inputs.github-packages != ''
         env:
           GITHUB_PACKAGES: ${{ inputs.github-packages }}
@@ -488,9 +521,9 @@ jobs:
             echo "built $(ls "$out")"
           done < "$src/order.txt"
           cat > rchk-packages/github/install.R <<'RSCRIPT'
-          lib <- Sys.getenv("R_LIBS")
+          lib <- .libPaths()[1]
           dir.create(lib, recursive = TRUE, showWarnings = FALSE)
-          for (d in sort(list.dirs("/rchk/packages/github", recursive = FALSE))) {
+          for (d in sort(list.dirs("/check/github", recursive = FALSE))) {
             tarball <- Sys.glob(file.path(d, "*.tar.gz"))
             stopifnot(length(tarball) == 1L)
             install.packages(tarball, lib = lib, repos = NULL)
@@ -500,8 +533,9 @@ jobs:
             }
           }
           RSCRIPT
-          docker run --rm -v "$(pwd)/rchk-packages":/rchk/packages \
-            "${RCHK_IMAGE:-kalibera/rchk:latest}" R -f /rchk/packages/github/install.R
+          # Installed by the analysis run below, in the same container: each
+          # docker run starts from the image, so an install in a run of its
+          # own would be gone by the next.
 
       # pipefail, because the default shell has none: without it the exit
       # status is tee's, so a failed pull, an rchk crash or a package that
@@ -521,25 +555,30 @@ jobs:
           tarball="$(sed -n 's/^Package:[[:space:]]*//p' DESCRIPTION)_$(sed -n 's/^Version:[[:space:]]*//p' DESCRIPTION).tar.gz"
           mkdir -p rchk-packages
           mv "$tarball" rchk-packages/
-          status=0
-          docker run --rm -v "$(pwd)/rchk-packages":/rchk/packages \
-            "${RCHK_IMAGE:-kalibera/rchk:latest}" "/rchk/packages/${tarball}" | tee rchk-output.txt || status=$?
-          if [ "$status" -ne 0 ]; then
-            if grep -qE '^Function |\[(UP|PB|UPB)\]|Suspicious call|too many states' rchk-output.txt; then
-              echo "::warning::rchk exited ${status} after analysing; the findings decide"
-            else
-              echo "::error::rchk exited ${status} without analysing anything: the pull, build or install failed"
-              exit 1
-            fi
+          # r-check installs the package's dependencies, builds it with the
+          # bitcode compilers and runs rchk's bcheck on every tarball at the
+          # top of /check; the GitHub packages, if any, are installed first.
+          cmd='r-check /check'
+          if [ -f rchk-packages/github/install.R ]; then
+            cmd='R -f /check/github/install.R && r-check /check'
           fi
+          status=0
+          docker run --rm -v "$(pwd)/rchk-packages":/check \
+            --entrypoint bash "$RCHK_IMAGE" -c "$cmd" | tee rchk-output.txt || status=$?
 
-          # The image exits 0 when the package will not install -- seen with
-          # a configure script whose system library the image lacks -- and
-          # then analyses nothing. Its own messages are the only sign.
-          if grep -qE '^Could not install package|^Cannot find package ' rchk-output.txt; then
-            echo "::error::rchk could not install the package, so nothing was analysed; see the install output above"
+          # rchk prints "Analyzed N functions" for every package it analyses.
+          # Without that line nothing was analysed -- a failed install, a
+          # compile error, an image that cannot build the package -- and the
+          # steps below would read the empty result as "no findings". That is
+          # how kalibera's January image passed cpp11 packages for months.
+          if ! grep -qE '^Analyzed [0-9]+ functions' rchk-output.txt; then
+            echo "::error::rchk analysed nothing (exit ${status}): the install or the build failed; see the output above"
             exit 1
           fi
+          if [ "$status" -ne 0 ]; then
+            echo "::warning::rchk exited ${status} after analysing; the findings decide"
+          fi
+          grep -E '^Analyzed [0-9]+ functions' rchk-output.txt | sed 's/^/rchk: /'
 
       # The pattern matters more than it looks.
       #
