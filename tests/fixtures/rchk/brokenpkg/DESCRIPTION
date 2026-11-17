@@ -1,0 +1,6 @@
+Package: brokenpkg
+Version: 0.0.1
+Title: Broken
+Description: Does not compile.
+License: MIT
+Authors@R: person("A", "B", role = c("aut", "cre"), email = "a@b.c")

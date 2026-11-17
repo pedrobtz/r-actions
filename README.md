@@ -999,7 +999,15 @@ The image is about 2.4 GB and is rebuilt by hand, so its R-devel can be old.
 ### `rchk.yml` — rchk static analysis
 
 Runs [Tomas Kalibera's rchk](https://github.com/kalibera/rchk) static analyzer
-inside Docker against the package's source tarball. Proves PROTECT-stack
+inside Docker against the package's source tarball, in R-hub's image
+[`ghcr.io/r-hub/containers/rchk:latest`](https://github.com/r-hub/containers),
+which is rebuilt daily on current R-devel with rchk's maintained line (LLVM 21,
+Ubuntu 26.04). `kalibera/rchk:latest`, used until 2026-11, was last built on
+2026-01-09 and could not compile packages linking cpp11 0.5.5, so it analysed
+nothing for them (pedrobtz/packages#219). The job records the image's digest and
+its R-devel revision in the summary, and fails if rchk analysed nothing, rather
+than reading an empty result as no findings. `image:` points it at another
+image that runs `r-check` on the tarballs in `/check`. Proves PROTECT-stack
 correctness (unprotected SEXPs, imbalanced PROTECT/UNPROTECT) that neither
 `R CMD check` nor the sanitizers detect. The job is informational: findings are
 uploaded as an artifact rather than hard-failing the build, because rchk can
@@ -1104,7 +1112,7 @@ The image has R and rchk's toolchain, and none of the `-dev` packages a
 `configure` script looks for. A package that links a system library therefore
 fails its own configure inside the image, and nothing is analysed — the job
 says so and fails, rather than reporting a clean run. Name the apt packages,
-and the job builds a local image on `kalibera/rchk:latest` with them
+and the job builds a local image on the rchk `image` with them
 installed, which every run in the job then uses (the `github-packages` install
 included):
 
