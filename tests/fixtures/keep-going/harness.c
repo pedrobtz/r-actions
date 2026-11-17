@@ -18,7 +18,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   }
   if (size >= 3 && data[0] == 'S' && data[1] == 'H') {
     volatile int shift = data[2];
-    volatile int value = 1 << shift; /* UB when shift >= 32 */
+    /* Unsigned, so that shift 31 is defined: with a signed 1 it is a second,
+     * differently worded UBSan report ("left shift of 1 by 31 places"),
+     * which the check would rightly count as a third finding. */
+    volatile unsigned value = 1u << shift; /* UB when shift >= 32 */
     (void)value;
   }
   return 0;

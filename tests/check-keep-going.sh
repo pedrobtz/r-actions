@@ -48,7 +48,12 @@ import json, sys
 f = json.load(sys.stdin)
 print(" ".join(sorted("ov" if "heap-buffer-overflow" in x["key"] else "sh" if "shift" in x["key"] else "?" for x in f)))')
 [ "$kinds" = "ov sh" ] && ok "keep-going: both bugs reported, one finding each" || bad "keep-going findings: [$kinds]"
-printf '%s' "$findings" | grep -q BuildId && bad "keep-going: a key carries the build's BuildId" || ok "keep-going: no key carries a BuildId"
+# The key and the description drop the BuildId, which changes with every
+# build; the details keep the stack as the sanitizer printed it.
+printf '%s' "$findings" | python3 -c '
+import json, sys
+sys.exit(any("BuildId" in x["key"] + x["finding"] for x in json.load(sys.stdin)))' \
+  && ok "keep-going: no key carries a BuildId" || bad "keep-going: a key carries the build's BuildId"
 cat summary
 
 exit $failed
