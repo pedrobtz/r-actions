@@ -683,7 +683,21 @@ jobs:
               CC=clang CXX=clang++
               BASE="-g -O2 -fsanitize=undefined -fno-sanitize=function -fno-omit-frame-pointer"
               EXTRA="$CLANG_EXTRA"
-              LINK="-fsanitize=undefined -shared-libsan -Wl,-rpath,$(clang -print-runtime-dir)"
+              # The rpath names every directory under clang's resource dir
+              # that holds a shared UBSan runtime, not -print-runtime-dir:
+              # on ubuntu-26.04's clang 21 that reports the per-target
+              # directory (lib/x86_64-pc-linux-gnu) while the linker takes
+              # libclang_rt.ubsan_standalone-x86_64.so from lib/linux, so the
+              # .so linked and then failed to load (zutable PR 40,
+              # 2026-11-18). clang 18 on ubuntu-24.04 reported lib/linux.
+              RTDIRS=$(find "$(clang -print-resource-dir)/lib" \
+                -name 'libclang_rt.ubsan_standalone*.so' -exec dirname {} \; | sort -u)
+              if [ -z "$RTDIRS" ]; then
+                echo "::error::no shared UBSan runtime under $(clang -print-resource-dir)/lib" >&2
+                exit 1
+              fi
+              LINK="-fsanitize=undefined -shared-libsan"
+              for d in $RTDIRS; do LINK="$LINK -Wl,-rpath,$d"; done
               if [ -n "$GCC_EXTRA" ]; then
                 echo "::notice::gcc-ubsan-flags skipped on the clang leg: these are GCC spellings"
               fi
