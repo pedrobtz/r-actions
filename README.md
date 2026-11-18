@@ -494,7 +494,7 @@ CC=clang -fsanitize=address,undefined -fno-omit-frame-pointer
 CXX=clang++ -fsanitize=address,undefined -fno-omit-frame-pointer
 CXX17=$(CXX)
 CXX20=$(CXX)
-LDFLAGS=-fsanitize=address,undefined -Wl,-rpath,<output of: clang -print-runtime-dir>
+LDFLAGS=-fsanitize=address,undefined -Wl,-rpath,<directory of libclang_rt.asan*.so under: clang -print-resource-dir>
 ```
 
 and install into a scratch library with `R CMD INSTALL --preclean`. Then run
