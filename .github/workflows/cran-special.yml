@@ -498,6 +498,9 @@ jobs:
           r-version: ${{ inputs.r-version }}
           http-user-agent: release
 
+      # Pandoc, so R CMD build can build the vignettes (below).
+      - uses: r-lib/actions/setup-pandoc@v2
+
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           needs: check
@@ -516,10 +519,17 @@ jobs:
             esac
           done
 
+      # The vignettes are built. A tarball without them has no inst/doc,
+      # and check then warns twice ("Files in the 'vignettes' directory but
+      # no files in 'inst/doc'", "Package vignette without corresponding
+      # single PDF/HTML") on every package with a vignette. --ignore-vignettes
+      # would silence that too, as nosuggests does, but it would also skip
+      # the re-building of the vignettes, which runs the package's code
+      # against the read-only library: part of what this job is for.
       - name: Build and install into the library
         run: |
           set -eu
-          R CMD build --no-manual --no-build-vignettes .
+          R CMD build --no-manual .
           tarball=$(ls -t ./*.tar.gz | head -1)
           echo "TARBALL=${tarball}" >> "$GITHUB_ENV"
           LIB="${RUNNER_TEMP}/rlibro-lib"

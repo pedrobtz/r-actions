@@ -1585,7 +1585,9 @@ synthetic package with one bug of each kind passed an ordinary
   library and from the one holding its dependencies, proves a write now fails,
   and runs `R CMD check --install=check:00install.out` against it. That reuses
   the install rather than letting check make a fresh, writable one in
-  `.Rcheck`, which would test nothing. A finding is a `Permission denied` or
+  `.Rcheck`, which would test nothing. The tarball is built with its
+  vignettes, so their re-building runs against the read-only library too. A
+  finding is a `Permission denied` or
   `Read-only file system` line that names one of those libraries. The path
   filter is what keeps a test that checks your own permission-error handling
   from counting. It runs on the runner, not in a container, because root
