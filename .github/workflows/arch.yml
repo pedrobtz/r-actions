@@ -10,7 +10,13 @@
 #   32-bit   size_t narrows to 32 bits and pointers halve. Every size and
 #            depth bound is arithmetic that behaves differently, and a limit
 #            computed as a product can overflow here while being nowhere near
-#            the limit on 64-bit. This is the highest-value missing leg.
+#            the limit on 64-bit. Opt-in since v1.46.0, not a default leg:
+#            from 2026-11-10 its apt step has failed DNS resolution in
+#            i386/debian:bookworm on every package that runs it (zubin,
+#            zufast, zurds, zurand, zukomp), while musl in the same run had
+#            network. A leg that is always red is read by nobody, and a
+#            package's pure-C core gets the same 32-bit arithmetic from a
+#            `-m32` build of its C tests at a fraction of the time.
 #
 #   musl     A different libc, and the differences bite C parsers
 #            specifically: a much smaller default thread stack, stricter
@@ -55,8 +61,13 @@ on:
               image     container image
               setup     shell command installing R and a toolchain
 
-          The default covers the two legs with the best ratio -- 32-bit and
-          musl -- and both of them run without emulation on an x86-64 runner.
+          The default is musl alone, which runs without emulation on an
+          x86-64 runner. 32-bit is opt-in (it was a default leg until
+          v1.46.0; see the comment at the top of this file for why it left):
+
+              {"name": "i386", "platform": "linux/386",
+               "image": "i386/debian:bookworm",
+               "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev locales libuv1-dev && echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen && locale-gen"}
 
           Each default setup installs what an ordinary package's check needs
           beyond R itself. On Debian, the en_US.UTF-8 locale (R CMD check
@@ -77,10 +88,7 @@ on:
         type: string
         required: false
         default: >-
-          [{"name": "i386", "platform": "linux/386",
-            "image": "i386/debian:bookworm",
-            "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev locales libuv1-dev && echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen && locale-gen"},
-           {"name": "musl", "platform": "linux/amd64",
+          [{"name": "musl", "platform": "linux/amd64",
             "image": "alpine:3.21",
             "setup": "apk add --no-cache R R-dev R-doc build-base linux-headers libuv-dev"}]
       install-dependencies:

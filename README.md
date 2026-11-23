@@ -1464,8 +1464,8 @@ one target.
 
 | leg | why |
 |:--|:--|
-| **32-bit** | `size_t` narrows to 32 bits and pointers halve. Every size and depth bound is arithmetic that behaves differently, and a limit computed as a product can overflow here while being nowhere near the limit on 64-bit. |
-| **musl** | A different libc, and the differences bite C parsers specifically: much smaller default thread stack, stricter `printf` on some conversions, no glibc extensions. |
+| **32-bit** (opt-in) | `size_t` narrows to 32 bits and pointers halve. Every size and depth bound is arithmetic that behaves differently, and a limit computed as a product can overflow here while being nowhere near the limit on 64-bit. |
+| **musl** (default) | A different libc, and the differences bite C parsers specifically: much smaller default thread stack, stricter `printf` on some conversions, no glibc extensions. |
 
 ```yaml
 on:
@@ -1477,7 +1477,26 @@ jobs:
     uses: pedrobtz/r-actions/.github/workflows/arch.yml@v1
 ```
 
-**Neither default leg needs QEMU.** Alpine is an ordinary amd64 image, and
+**The default is musl alone.** 32-bit was a default leg until v1.46.0. From
+2026-11-10 its `apt-get update` failed DNS resolution inside
+`i386/debian:bookworm` on every package that ran it, while the musl leg in the
+same run had network, and a leg that is always red is a leg nobody reads. A
+package whose risk is 32-bit size arithmetic in C gets most of it from a
+`-m32` build of its C tests, which is much faster. Add the leg back when you
+want R itself at 32 bits:
+
+```yaml
+    with:
+      targets: >-
+        [{"name": "i386", "platform": "linux/386",
+          "image": "i386/debian:bookworm",
+          "setup": "apt-get update && apt-get install -y --no-install-recommends r-base-dev locales libuv1-dev && echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen && locale-gen"},
+         {"name": "musl", "platform": "linux/amd64",
+          "image": "alpine:3.21",
+          "setup": "apk add --no-cache R R-dev R-doc build-base linux-headers libuv-dev"}]
+```
+
+**None of these legs needs QEMU.** Alpine is an ordinary amd64 image, and
 `linux/386` is x86 code the same CPU executes directly, so the emulation this
 is assumed to require is only involved for a non-x86 target such as aarch64 —
 and the workflow skips the QEMU setup for the legs that do not need it. It is
