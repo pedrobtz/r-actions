@@ -926,6 +926,14 @@ jobs:
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       R_KEEP_PKG_SOURCE: yes
+      # The library the package is installed into and checked against. Not
+      # under the checkout: the default run does `R CMD build .`, which ships
+      # every file .Rbuildignore does not exclude, so a library inside the
+      # checkout went into the tarball. R CMD check then NOTEd "not a source
+      # package" on every caller, and on decimal it was an ERROR: the
+      # installed help has Summary+2edecimal.html and summary+2edecimal.html,
+      # file names that differ only by case (found by decimal, 2026-11-16).
+      ASAN_LIB: /tmp/r-actions-asan-lib
 
     steps:
       - uses: actions/checkout@v7
@@ -1104,10 +1112,11 @@ jobs:
       # and the result is a green job on a build with no instrumentation in
       # it. pkgload leaves exactly such objects behind.
       - name: Install the package
+        id: asan-install
         run: |
           set -eu
-          mkdir -p "${GITHUB_WORKSPACE}/lib"
-          R CMD INSTALL --preclean --library="${GITHUB_WORKSPACE}/lib" .
+          mkdir -p "$ASAN_LIB"
+          R CMD INSTALL --preclean --library="$ASAN_LIB" .
 
       # The same check the job above makes, for the same reason, against the
       # other runtime. Kept inline rather than factored into a composite
@@ -1116,6 +1125,7 @@ jobs:
       # referring to it as pedrobtz/r-actions/...@v1 pins a version inside a
       # file that is itself versioned.
       - name: Verify instrumentation
+        id: asan-verify
         run: |
           set -eu
           if [ ! -d src ]; then
@@ -1123,7 +1133,7 @@ jobs:
             exit 0
           fi
           found=0
-          for so in "${GITHUB_WORKSPACE}"/lib/*/libs/*.so; do
+          for so in "$ASAN_LIB"/*/libs/*.so; do
             [ -e "$so" ] || continue
             found=1
             echo "== $so"
@@ -1166,18 +1176,20 @@ jobs:
       # printed before the job ends. A sanitizer job whose output was
       # swallowed is a job that taught nobody anything.
       - name: Run under the sanitizer
+        id: asan-run
         env:
           SUPPRESSIONS: ${{ inputs.ubsan-suppressions }}
           RUN_COMMAND: ${{ inputs.asan-run }}
           _R_CHECK_FORCE_SUGGESTS_: "false"
         run: |
           set -u
-          # Both paths are built here from $GITHUB_WORKSPACE, not in `env:`
-          # from github.workspace: in a container job the expression is the
-          # *host's* path, which does not exist inside the container. That
+          # The suppressions path is built here from $GITHUB_WORKSPACE, not in
+          # `env:` from github.workspace: in a container job the expression is
+          # the *host's* path, which does not exist inside the container. That
           # left R_LIBS pointing nowhere and handed UBSan a suppressions file
           # it could not open -- which aborts every instrumented process.
-          export R_LIBS="${GITHUB_WORKSPACE}/lib"
+          # ASAN_LIB is a literal container path, so it has no such problem.
+          export R_LIBS="$ASAN_LIB"
           # No halt_on_error here, as in the runner job: this job reads the
           # log afterwards instead, and "runtime error:" in that pattern is
           # what makes a UBSan finding fail the job. Not log_path, unlike the
