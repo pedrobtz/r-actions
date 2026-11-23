@@ -53,6 +53,20 @@ jobs:
           /tmp/gate/bin/pip install --quiet pyyaml
           PATH="/tmp/gate/bin:$PATH" bash tests/check-gate.sh
 
+  asan-lib:
+    name: asan job installs outside the checkout, so the tarball ships no library
+    # A library under the checkout goes into `R CMD build .`'s tarball. That
+    # fails nothing until a package's installed file names collide by case,
+    # as decimal's did; every other caller just carries a NOTE.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the asan job's install, verify and run steps
+        run: |
+          python3 -m venv /tmp/asan-lib
+          /tmp/asan-lib/bin/pip install --quiet pyyaml
+          PATH="/tmp/asan-lib/bin:$PATH" bash tests/check-asan-lib.sh
+
   report:
     name: fuzz findings are described and reported once each
     # A key that moves with line numbers files a duplicate issue every
