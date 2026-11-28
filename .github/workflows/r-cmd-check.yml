@@ -87,8 +87,8 @@ on:
           compiler major and CRAN's own -O3 -Wall -pedantic, but builds C++
           against libc++ where CRAN uses libstdc++. ubuntu-clang has the
           right C++ standard library and is the image r-hub badges as that
-          flavor, but is pinned to clang 22 and ships no -pedantic. Together
-          they bracket it.
+          flavor, but builds at -O2 where CRAN uses -O3, and ships no -Wall
+          or -pedantic. Together they bracket it.
         type: string
         required: false
         default: '["clang23", "ubuntu-clang", "ubuntu-gcc16"]'
@@ -98,10 +98,11 @@ on:
           step, to make the images compile the way CRAN does.
 
           The default is not decoration. Measured on the images themselves:
-          ubuntu-clang is `clang-22` with no `-std=` at all, so it compiles
+          ubuntu-clang is `clang-23` with no `-std=` at all, so it compiles
           at __STDC_VERSION__ 201710L, while CRAN's debian-clang leg is
-          `clang-23 -std=gnu23`; and both images set CFLAGS to `-g -O2`,
-          where CRAN uses `-g -O3 -Wall -pedantic`. A container job without
+          `clang-23 -std=gnu23`; and ubuntu-clang and ubuntu-gcc16 set CFLAGS
+          to `-g -O2`, where CRAN uses `-g -O3 -Wall -pedantic` (clang) and
+          `-g -O2 -Wall -Wstrict-prototypes -pedantic` (GCC). A container job without
           this override is a weaker check than the runners it sits beside --
           it reported a clean build on sources CRAN had already rejected.
 
@@ -115,6 +116,9 @@ on:
           reached CRAN clean on these legs and then drew a significant
           warning on r-devel-linux-x86_64-fedora-gcc (measured on Fedora 44,
           GCC 16.2.1: two warnings with -Wall, none without).
+          -Wstrict-prototypes is on both CRAN GCC flavors and on Windows.
+          Under -std=gnu23 an empty `()` is a prototype, but GCC 16 still
+          warns on an old-style (K&R) definition, which vendored C can carry.
 
           These lines are appended to whatever user Makevars the image
           already uses. They are never written somewhere new and pointed at
@@ -127,7 +131,7 @@ on:
         required: false
         default: |
           CC += -std=gnu23
-          CFLAGS += -Wall -pedantic
+          CFLAGS += -Wall -pedantic -Wstrict-prototypes
       args:
         description: >
           Check arguments, as an R expression. `--as-cran` is the point of
@@ -158,9 +162,38 @@ on:
 
           Off by default, because a package with no Suggests learns nothing
           from it.
+
+          The image is also the one place here with CRAN's exact
+          r-devel-linux-x86_64-fedora-gcc compiler (Fedora 44, GCC 16.2.1;
+          `ubuntu-gcc16` is a GCC 16.0.1 pre-release), so
+          `nosuggests-makevars` gives it that flavor's flags as well.
         type: boolean
         required: false
         default: false
+      nosuggests-makevars:
+        description: >
+          Lines appended to a user Makevars for the `nosuggests` job, to make
+          its image compile the way CRAN's r-devel-linux-x86_64-fedora-gcc
+          flavor does.
+
+          The image ships CFLAGS and CXXFLAGS of `-g -O2` with GCC 16.2.1,
+          which is the fedora-gcc compiler with none of its flags. The
+          default is that flavor's CFLAGS and CXXFLAGS from its published
+          configuration (https://www.stats.ox.ac.uk/pub/bdr/Rconfig/r-devel-linux-x86_64-fedora-gcc),
+          less `-mtune=native`, which changes code generation for the build
+          machine and no diagnostic. Measured on zuproto 0.1.0: the check's
+          install step was OK in this image as shipped, and WARNING with
+          exactly the two -Warray-bounds lines CRAN's fedora-gcc reported.
+
+          The two -Werror= flags are CRAN's: an implicit declaration or an
+          unsafe format string fails the install there, so it does here.
+
+          Set to "" to take the image exactly as it ships.
+        type: string
+        required: false
+        default: |
+          CFLAGS += -Wall -pedantic -Wstrict-prototypes -Werror=format-security -Werror=implicit-function-declaration -Wp,-D_FORTIFY_SOURCE=3 -fexceptions -fstack-protector-strong -fstack-clash-protection -fcf-protection
+          CXXFLAGS += -Wall -pedantic -Wno-ignored-attributes -Wno-parentheses -Werror=format-security -Wp,-D_FORTIFY_SOURCE=3 -fexceptions -fstack-protector-strong -fstack-clash-protection -fcf-protection
       nold:
         description: >
           Run the `nold` job: R CMD check in the R-hub `nold` image, which is
@@ -1098,6 +1131,29 @@ jobs:
               *) echo "Ignoring malformed env line: $line" >&2 ;;
             esac
           done
+
+      # The same append as the containers job's, for the same reason: the
+      # image sets no R_MAKEVARS_USER, but one that did would keep its own
+      # toolchain and gain only these flags.
+      - name: Compile the way CRAN's fedora-gcc does
+        if: inputs.nosuggests-makevars != ''
+        env:
+          MAKEVARS: ${{ inputs.nosuggests-makevars }}
+        run: |
+          set -eu
+          target="${R_MAKEVARS_USER:-${HOME}/.R/Makevars}"
+          mkdir -p "$(dirname "$target")"
+          printf '%s\n' "$MAKEVARS" >> "$target"
+          echo "--- appended to ${target} ---"
+          cat "$target"
+
+      - name: Record the toolchain, after the override
+        run: |
+          set -eu
+          for v in CC CXX CFLAGS CXXFLAGS; do
+            printf '%s = %s\n' "$v" "$(R CMD config $v)"
+          done
+          $(R CMD config CC) --version | head -1
 
       # --no-build-vignettes on top of --no-manual, which the other two
       # container jobs do not need. This image installs no Suggests at all by
