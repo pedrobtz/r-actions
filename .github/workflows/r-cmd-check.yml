@@ -194,6 +194,52 @@ on:
         default: |
           CFLAGS += -Wall -pedantic -Wstrict-prototypes -Werror=format-security -Werror=implicit-function-declaration -Wp,-D_FORTIFY_SOURCE=3 -fexceptions -fstack-protector-strong -fstack-clash-protection -fcf-protection
           CXXFLAGS += -Wall -pedantic -Wno-ignored-attributes -Wno-parentheses -Werror=format-security -Wp,-D_FORTIFY_SOURCE=3 -fexceptions -fstack-protector-strong -fstack-clash-protection -fcf-protection
+      runner-makevars-linux:
+        description: >
+          Lines appended to the user Makevars on the Linux `runners` legs.
+          Empty by default, on measurement rather than oversight.
+
+          setup-r's R on ubuntu-latest compiles with `-g -O2` where CRAN's
+          r-release and r-patched Linux flavors add `-Wall -Wstrict-prototypes
+          -pedantic`, so adding those looks like the same fix the containers
+          got. It is not: the runner's GCC defines __SSE4_1__ by default and
+          CRAN's compilers do not, so the runner builds SIMD paths CRAN
+          never compiles. With `-Wall -pedantic -Wstrict-prototypes`,
+          zuproto's vendored utf8_range_sse.inc (compiled only under
+          __SSE4_1__) failed both Linux runner legs on -Woverflow, a warning
+          no CRAN flavor can produce. The containers job is the faithful
+          copy of CRAN's Linux flavors; these legs answer the R-version
+          question, release and oldrel.
+
+          Set it, for example to `CFLAGS += -Wall`, to opt in anyway.
+        type: string
+        required: false
+        default: ""
+      runner-makevars-windows:
+        description: >
+          Lines appended to the user Makevars on the Windows `runners` legs,
+          to compile the way CRAN's Windows flavors do.
+
+          Measured on windows-latest: Rtools' GCC 14.3.0, CRAN's own, with
+          CFLAGS of `-O2 -Wall -std=gnu2x -mfpmath=sse -msse2
+          -mstackrealign`. CRAN's r-devel-windows-x86_64 compiles with
+          `-pedantic -Wstrict-prototypes` in front of exactly those, so
+          the default adds them.
+
+          Set to "" to take Rtools' R as it ships.
+        type: string
+        required: false
+        default: |
+          CFLAGS += -pedantic -Wstrict-prototypes
+      runner-makevars-macos:
+        description: >
+          Lines appended to the user Makevars on the macOS `runners` legs.
+          Empty by default: measured on macos-latest, CRAN's R binary
+          already compiles with r-release-macos-arm64's flags,
+          `-falign-functions=64 -Wall -g -O2`.
+        type: string
+        required: false
+        default: ""
       nold:
         description: >
           Run the `nold` job: R CMD check in the R-hub `nold` image, which is
@@ -731,6 +777,45 @@ jobs:
               *) echo "Ignoring malformed env line: $line" >&2 ;;
             esac
           done
+
+      # R itself says which user Makevars it will read, so the lines go
+      # there: tools::makevars_user() honours R_MAKEVARS_USER and each OS's
+      # own file names (Makevars.ucrt, Makevars.win64, Makevars.win on
+      # Windows). With none, a new file is written and R_MAKEVARS_USER
+      # points at it for the later steps -- safe exactly because there was
+      # no user Makevars for it to replace.
+      - name: Compile the way CRAN does
+        if: >-
+          (runner.os == 'Linux' && inputs.runner-makevars-linux != '')
+          || (runner.os == 'Windows' && inputs.runner-makevars-windows != '')
+          || (runner.os == 'macOS' && inputs.runner-makevars-macos != '')
+        shell: Rscript {0}
+        env:
+          MAKEVARS: ${{ runner.os == 'Linux' && inputs.runner-makevars-linux || runner.os == 'Windows' && inputs.runner-makevars-windows || inputs.runner-makevars-macos }}
+        run: |
+          target <- tools::makevars_user()
+          if (length(target) == 0) {
+            target <- file.path(Sys.getenv("RUNNER_TEMP"), "Makevars-cran")
+            cat(sprintf("R_MAKEVARS_USER=%s\n", target),
+                file = Sys.getenv("GITHUB_ENV"), append = TRUE)
+          }
+          cat(Sys.getenv("MAKEVARS"), "\n", sep = "", file = target[1], append = TRUE)
+          cat("--- appended to", target[1], "---\n")
+          writeLines(readLines(target[1]))
+
+      # The containers jobs log their toolchain; this is the same record for
+      # the runners, whose R comes from setup-r rather than from an image.
+      # `R CMD config` reports Makeconf alone, so the user Makevars R will
+      # read on top of it is printed too.
+      - name: Record the toolchain
+        shell: bash
+        run: |
+          set -eu
+          for v in CC CXX CFLAGS CXXFLAGS; do
+            printf '%s = %s\n' "$v" "$(R CMD config $v)"
+          done
+          $(R CMD config CC) --version | head -1
+          Rscript -e 'for (f in tools::makevars_user()) { cat("--- user Makevars:", f, "---\n"); writeLines(readLines(f)) }'
 
       # error-on drops to "error" only when the caller listed warnings it
       # accepts; the gate step below then re-imposes the same strictness

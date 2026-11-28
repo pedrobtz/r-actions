@@ -165,6 +165,37 @@ Optional inputs:
       quick-containers: '["clang23"]'                  # default
 ```
 
+**The Windows runners are overridden to compile the way CRAN's Windows
+flavors do.** Measured with the job's own toolchain record: Rtools' R
+compiles with GCC 14.3.0, CRAN's own, and `-O2 -Wall -std=gnu2x -mfpmath=sse
+-msse2 -mstackrealign`; CRAN's `r-devel-windows-x86_64` puts `-pedantic
+-Wstrict-prototypes` in front of exactly those. `runner-makevars-windows`
+adds them by default. R itself picks the file (`tools::makevars_user()`);
+with none, a new one is written and `R_MAKEVARS_USER` points at it.
+
+macOS needs nothing: the runner's R is CRAN's binary, and its flags are
+`r-release-macos-arm64`'s, `-falign-functions=64 -Wall -g -O2`.
+
+**The Linux runners are deliberately left alone.** Their `-g -O2` lacks
+CRAN's `-Wall -pedantic -Wstrict-prototypes`, but adding them gives a false
+alarm: the runner's GCC defines `__SSE4_1__` by default where CRAN's
+compilers do not, so it builds SIMD code CRAN never compiles. On zuproto,
+vendored `utf8_range_sse.inc` (compiled only under `__SSE4_1__`) failed both
+Linux runner legs on `-Woverflow`, which no CRAN flavor can report. The
+containers are the faithful copy of CRAN's Linux flavors; the Linux runners
+answer the R-version question. `runner-makevars-linux` opts in anyway.
+
+```yaml
+    with:
+      runner-makevars-windows: |                       # default; "" as-is
+        CFLAGS += -pedantic -Wstrict-prototypes
+      runner-makevars-linux: ""                        # default
+      runner-makevars-macos: ""                        # default
+```
+
+Every runner leg logs `CC`, `CXX`, the flags and the user Makevars R will
+read, before checking.
+
 `containers` takes any name from <https://r-hub.github.io/containers/>.
 `ubuntu-next` and `ubuntu-release` are CRAN-like too, but sit closer to what
 the `runners` job already does. `build-args` reaches the `runners` job only:
