@@ -107,8 +107,14 @@ on:
 
           `+=` rather than `=`, so the image keeps its own compiler and only
           gains the flags; that survives the image bumping clang versions.
-          -pedantic rather than -Wall: several of the diagnostics that only
-          CRAN sees, -Wkeyword-macro among them, are pedantic-only.
+          Both -Wall and -pedantic, because each catches what the other
+          misses. Several of the diagnostics that only CRAN sees,
+          -Wkeyword-macro among them, are pedantic-only. And ubuntu-gcc16
+          and ubuntu-clang ship no -Wall, which every CRAN Linux flavor has:
+          GCC 16's -Warray-bounds is a -Wall warning, and zuproto 0.1.0
+          reached CRAN clean on these legs and then drew a significant
+          warning on r-devel-linux-x86_64-fedora-gcc (measured on Fedora 44,
+          GCC 16.2.1: two warnings with -Wall, none without).
 
           These lines are appended to whatever user Makevars the image
           already uses. They are never written somewhere new and pointed at
@@ -121,7 +127,7 @@ on:
         required: false
         default: |
           CC += -std=gnu23
-          CFLAGS += -pedantic
+          CFLAGS += -Wall -pedantic
       args:
         description: >
           Check arguments, as an R expression. `--as-cran` is the point of

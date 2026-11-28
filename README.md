@@ -97,12 +97,20 @@ with four `-Wkeyword-macro` warnings. And clang 23 itself still defaults to
 `__STDC_VERSION__ 201710L` — CRAN's `-std=gnu23` is an explicit choice, so
 forcing it is necessary rather than redundant.
 
+`-Wall` is the other half. `ubuntu-gcc16` and `ubuntu-clang` ship without it,
+and every CRAN Linux flavor has it. GCC's `-Warray-bounds` is a `-Wall`
+warning that depends on the optimiser's inlining, so a newer GCC can raise it
+on code an older one compiled clean. zuproto 0.1.0 passed every container leg and
+then drew a significant `-Warray-bounds` warning on CRAN's
+`r-devel-linux-x86_64-fedora-gcc` (GCC 16.2.1), which reproduced with `-Wall`
+and vanished without it.
+
 `container-makevars` closes it, appending to a user Makevars that R reads
 after its own `Makeconf`:
 
 ```make
 CC     += -std=gnu23
-CFLAGS += -pedantic
+CFLAGS += -Wall -pedantic
 ```
 
 `+=` rather than `=`, so the image keeps its own compiler and only gains the
@@ -129,7 +137,7 @@ Optional inputs:
       containers: '["clang23", "ubuntu-clang", "ubuntu-gcc16"]'  # default; '[]' skips
       container-makevars: |                            # default; "" takes images as-is
         CC += -std=gnu23
-        CFLAGS += -pedantic
+        CFLAGS += -Wall -pedantic
       runners: |                                       # default
         [{"os": "macos-latest", "r": "release"},
          {"os": "windows-latest", "r": "release"},
