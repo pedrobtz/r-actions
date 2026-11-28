@@ -80,15 +80,16 @@ of the box they do not. Measured on the images themselves:
 | | `CC` | `CFLAGS` | C++ stdlib |
 |---|---|---|---|
 | CRAN debian-clang | `clang-23 -std=gnu23` | `-g -O3 -Wall -pedantic` | libstdc++ |
+| CRAN debian-gcc | `gcc-16` | `-g -O2 -Wall -Wstrict-prototypes -pedantic` | libstdc++ |
 | `clang23` | `clang-23` | `-O3 -Wall -pedantic` | **libc++** |
-| `ubuntu-clang` | **`clang-22`** | **`-g -O2`** | libstdc++ |
+| `ubuntu-clang` | `clang-23` | **`-g -O2`** | libstdc++ |
 | `ubuntu-gcc16` | `gcc-16 -std=gnu2x` | `-g -O2` | — |
 
 No single image is CRAN's debian-clang. `clang23` has the right compiler
 major and CRAN's exact C flags but builds C++ against libc++; `ubuntu-clang`
 has the right C++ standard library and is the image r-hub badges as that
-flavor, but is pinned to clang 22 and ships no `-pedantic`. The default runs
-both, because they fail differently.
+flavor, but builds at `-O2` rather than CRAN's `-O3` and ships no `-Wall` or
+`-pedantic`. The default runs both, because they fail differently.
 
 `-pedantic` matters more than it looks: it, not `-Wall`, is what enables
 several of the diagnostics only CRAN reports. Unoverridden, `ubuntu-clang`
@@ -97,12 +98,24 @@ with four `-Wkeyword-macro` warnings. And clang 23 itself still defaults to
 `__STDC_VERSION__ 201710L` — CRAN's `-std=gnu23` is an explicit choice, so
 forcing it is necessary rather than redundant.
 
+`-Wall` is the other half. `ubuntu-gcc16` and `ubuntu-clang` ship without it,
+and every CRAN Linux flavor has it. GCC's `-Warray-bounds` is a `-Wall`
+warning that depends on the optimiser's inlining, so a newer GCC can raise it
+on code an older one compiled clean. zuproto 0.1.0 passed every container leg and
+then drew a significant `-Warray-bounds` warning on CRAN's
+`r-devel-linux-x86_64-fedora-gcc` (GCC 16.2.1), which reproduced with `-Wall`
+and vanished without it.
+
+`-Wstrict-prototypes` is on both CRAN GCC flavors and on Windows. Under
+`-std=gnu23` an empty `()` already declares a prototype, but GCC 16 still warns
+on an old-style (K&R) definition, which vendored C can carry.
+
 `container-makevars` closes it, appending to a user Makevars that R reads
 after its own `Makeconf`:
 
 ```make
 CC     += -std=gnu23
-CFLAGS += -pedantic
+CFLAGS += -Wall -pedantic -Wstrict-prototypes
 ```
 
 `+=` rather than `=`, so the image keeps its own compiler and only gains the
@@ -129,7 +142,9 @@ Optional inputs:
       containers: '["clang23", "ubuntu-clang", "ubuntu-gcc16"]'  # default; '[]' skips
       container-makevars: |                            # default; "" takes images as-is
         CC += -std=gnu23
-        CFLAGS += -pedantic
+        CFLAGS += -Wall -pedantic -Wstrict-prototypes
+      nosuggests-makevars: |                           # default: fedora-gcc's flags; "" as-is
+        CFLAGS += -Wall -pedantic ...                  # (full default above)
       runners: |                                       # default
         [{"os": "macos-latest", "r": "release"},
          {"os": "windows-latest", "r": "release"},
@@ -156,6 +171,21 @@ the `runners` job already does. `build-args` reaches the `runners` job only:
 the container images carry no LaTeX and no vignette-compaction tooling. The
 `nosuggests` job additionally builds with `--no-build-vignettes`, since that
 image installs no Suggests and so has no vignette engine to build with.
+
+**`nosuggests` also compiles as CRAN's `r-devel-linux-x86_64-fedora-gcc`
+does.** Its image is Fedora 44 with GCC 16.2.1, that flavor's exact compiler
+(`ubuntu-gcc16` is a GCC 16.0.1 pre-release), but ships `-g -O2` and nothing
+else. `nosuggests-makevars` appends the flavor's published CFLAGS and CXXFLAGS,
+less `-mtune=native`:
+
+```make
+CFLAGS += -Wall -pedantic -Wstrict-prototypes -Werror=format-security -Werror=implicit-function-declaration -Wp,-D_FORTIFY_SOURCE=3 -fexceptions -fstack-protector-strong -fstack-clash-protection -fcf-protection
+CXXFLAGS += -Wall -pedantic -Wno-ignored-attributes -Wno-parentheses -Werror=format-security -Wp,-D_FORTIFY_SOURCE=3 -fexceptions -fstack-protector-strong -fstack-clash-protection -fcf-protection
+```
+
+On zuproto 0.1.0 the install step was OK in the image as shipped and WARNING
+with these flags, listing exactly the two `-Warray-bounds` lines CRAN's
+fedora-gcc reported. Set it to `""` to take the image as it ships.
 
 #### `pre-install` — a heavy Suggests with no R-devel binary
 
