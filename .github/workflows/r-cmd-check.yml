@@ -732,6 +732,22 @@ jobs:
             esac
           done
 
+      # The containers jobs log their toolchain; this is the same record for
+      # the runners, whose R comes from setup-r rather than from an image.
+      # The user Makevars is shown too, since R reads it after Makeconf and
+      # a runner image or a pre-install command can leave one behind.
+      - name: Record the toolchain
+        shell: bash
+        run: |
+          set -eu
+          for v in CC CXX CFLAGS CXXFLAGS; do
+            printf '%s = %s\n' "$v" "$(R CMD config $v)"
+          done
+          $(R CMD config CC) --version | head -1
+          for f in "${R_MAKEVARS_USER:-}" "$HOME/.R/Makevars" "$HOME/.R/Makevars.win" "$HOME/.R/Makevars.ucrt" "$HOME/.R/Makevars.win64"; do
+            if [ -n "$f" ] && [ -f "$f" ]; then echo "--- $f ---"; cat "$f"; fi
+          done
+
       # error-on drops to "error" only when the caller listed warnings it
       # accepts; the gate step below then re-imposes the same strictness
       # against that list. With no list this is the action's own default.
